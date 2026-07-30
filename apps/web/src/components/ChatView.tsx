@@ -6345,7 +6345,6 @@ function ChatViewContent(props: ChatViewProps) {
               <MessagesTimeline
                 key={activeThread.id}
                 isWorking={isWorking}
-                activeTurnInProgress={isWorking || !latestRunSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
                 pendingBackgroundTasks={pendingBackgroundTasks}
                 listRef={legendListRef}
