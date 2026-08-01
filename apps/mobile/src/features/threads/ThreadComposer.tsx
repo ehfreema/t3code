@@ -112,6 +112,9 @@ export interface ThreadComposerProps {
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  /** When true, same-instance spawn-bound provider options are locked for this thread. */
+  readonly optionChangeBlocked?: boolean;
+  readonly optionChangeBlockedInstanceId?: string | null;
   readonly onReconnectEnvironment: () => void;
   readonly onExpandedChange?: (expanded: boolean) => void;
 }
