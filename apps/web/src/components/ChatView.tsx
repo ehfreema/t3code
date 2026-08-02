@@ -32,6 +32,7 @@ import {
   deriveThreadActivityRun,
   deriveLatestThreadRun,
   deriveThreadRuntime,
+  threadRuntimeHasInterruptibleProviderNativeBackgroundWork,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { resolveThreadProviderSession } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolveThreadLastVisitedAt } from "./Sidebar.logic";
@@ -2228,6 +2229,8 @@ function ChatViewContent(props: ChatViewProps) {
   const selectedProvider: ProviderDriverKind =
     modelPickerLockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeRuntime);
+  const hasInterruptibleProviderNativeBackgroundWork =
+    threadRuntimeHasInterruptibleProviderNativeBackgroundWork(activeRuntime);
   const pendingRequests = useMemo(
     () =>
       serverProjection === null
@@ -6475,6 +6478,9 @@ function ChatViewContent(props: ChatViewProps) {
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
                             phase={phase}
+                            hasInterruptibleProviderNativeBackgroundWork={
+                              hasInterruptibleProviderNativeBackgroundWork
+                            }
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
                             isPreparingWorktree={isPreparingWorktree}
