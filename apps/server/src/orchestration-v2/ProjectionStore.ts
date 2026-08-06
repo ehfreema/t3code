@@ -244,6 +244,7 @@ export function applyToProjection(
           settledOverride: event.payload.settledOverride,
           settledAt: event.payload.settledAt,
           updatedAt: event.payload.updatedAt,
+          ...(event.type === "thread.settled" ? { pinnedAt: event.payload.pinnedAt ?? null } : {}),
         },
         activityAtMs: DateTime.toEpochMillis(event.occurredAt),
         currentTimestamps: {
@@ -1390,6 +1391,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     settledOverride: event.payload.settledOverride,
                     settledAt: event.payload.settledAt,
                     updatedAt: event.payload.updatedAt,
+                    ...(event.type === "thread.settled"
+                      ? { pinnedAt: event.payload.pinnedAt ?? null }
+                      : {}),
                   },
                   activityAtMs: DateTime.toEpochMillis(event.occurredAt),
                   currentTimestamps: {
@@ -1444,7 +1448,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 `;
                 break;
               }
-              case "run.created":
+case "run.created":
               case "run.updated": {
                 const payloadJson = yield* encodeRunPayload(event.payload);
                 const payload = parseEncodedPayload(payloadJson);
