@@ -6,6 +6,7 @@ const { withUniwindConfig } = require("uniwind/metro");
 /** @type {import("expo/metro-config").MetroConfig} */
 const config = getDefaultConfig(__dirname);
 const workspaceRoot = path.resolve(__dirname, "../..");
+const aubeVirtualStore = path.join(require("node:os").homedir(), ".cache", "aube", "virtual-store");
 const escapedWorkspaceRoot = workspaceRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const mobileShikiRoot = path.dirname(require.resolve("shiki/package.json", { paths: [__dirname] }));
 const resolveShikiDependencyRoot = (packageName) => {
@@ -23,7 +24,17 @@ const resolveShikiDependencyRoot = (packageName) => {
   return currentDir;
 };
 
-config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
+config.watchFolders = [
+  ...new Set([
+    ...(config.watchFolders ?? []),
+    workspaceRoot,
+    ...(fs.existsSync(aubeVirtualStore) ? [aubeVirtualStore] : []),
+  ]),
+];
+// aube/pnpm places packages under ~/.cache/aube/virtual-store via nested
+// symlinks; Metro will not resolve them unless that store is watched and
+// symlink following is enabled (needed for Release Hermes embed on device).
+config.resolver.unstable_enableSymlinks = true;
 config.resolver = {
   ...config.resolver,
   blockList: [
