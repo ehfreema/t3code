@@ -1903,6 +1903,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               request: {
                 type: "provider-session.detach",
                 providerSessionId: session.id,
+                providerSession: session,
                 detail:
                   command.type === "thread.archive"
                     ? "Thread archived."
@@ -1925,7 +1926,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   ? {
                       deleteProviderThread: true,
                       providerInstanceId: session.providerInstanceId,
-                      providerSession: session,
                       providerThreads,
                     }
                   : {}),
@@ -2015,6 +2015,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         request: {
           type: "provider-session.detach",
           providerSessionId: command.providerSessionId,
+          providerSession: session,
           ...(command.reason === undefined ? {} : { detail: command.reason }),
         },
       } satisfies PendingOrchestrationEffectV2;
