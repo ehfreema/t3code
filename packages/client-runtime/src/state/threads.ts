@@ -154,6 +154,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const coalesceGeneration = yield* Ref.make(0);
   // Wall-clock debounce so production UI pacing is real time and TestClock
   // harnesses (forkDetach + Effect.sleep) do not hang forever.
+  // Known client-runtime timer diagnostic under globalTimersInEffect: intentional.
   const coalesceWallSleep = Effect.callback<void>((resume) => {
     const handle = setTimeout(() => {
       resume(Effect.void);
