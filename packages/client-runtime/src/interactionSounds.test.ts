@@ -3,10 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import type { EnvironmentThreadShell, ThreadRunSummary } from "./state/models.ts";
 import {
   captureThreadSoundState,
-  captureThreadSoundStatePreservingUnobserved,
-  captureThreadSoundStateWhileSettingsHydrating,
   deriveInteractionSoundCues,
-  selectLiveThreadShells,
+  observeThreadSoundState,
   shouldPlayInteractionSound,
 } from "./interactionSounds.ts";
 
@@ -69,15 +67,23 @@ function makeThread(overrides: Partial<EnvironmentThreadShell> = {}): Environmen
   };
 }
 
+function userRun(overrides: Partial<ThreadRunSummary> = {}): ThreadRunSummary {
+  return makeRun({
+    requestedAt: "2026-07-11T12:00:02.000Z",
+    startedAt: "2026-07-11T12:00:03.000Z",
+    ...overrides,
+  });
+}
+
 describe("interaction sounds", () => {
   it("plays success when a run is associated with a nearby user message", () => {
     const running = makeThread({
       latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestRun: makeRun({ status: "running" }),
+      latestRun: userRun({ status: "running" }),
     });
     const completed = makeThread({
       latestUserMessageAt: running.latestUserMessageAt,
-      latestRun: makeRun({
+      latestRun: userRun({
         status: "completed",
         completedAt: "2026-07-11T12:00:05.000Z",
       }),
@@ -120,194 +126,28 @@ describe("interaction sounds", () => {
         startedAt: "2026-07-11T12:05:00.000Z",
       }),
     });
-    const completedAfterSteering = makeThread({
-      latestUserMessageAt: "2026-07-11T12:06:00.000Z",
+    const steeredAfterStart = makeThread({
+      latestUserMessageAt: "2026-07-11T12:05:30.000Z",
       latestRun: makeRun({
         runId: RunId.make("subagent-run"),
         status: "completed",
         requestedAt: "2026-07-11T12:05:00.000Z",
         startedAt: "2026-07-11T12:05:00.000Z",
-        completedAt: "2026-07-11T12:06:05.000Z",
+        completedAt: "2026-07-11T12:06:00.000Z",
       }),
     });
 
     expect(
-      deriveInteractionSoundCues(captureThreadSoundState([backgroundRunning]), [
-        completedAfterSteering,
-      ]),
+      deriveInteractionSoundCues(captureThreadSoundState([backgroundRunning]), [steeredAfterStart]),
     ).toEqual([]);
   });
 
-  it("plays bloom when a thread starts requesting user input", () => {
-    const thread = makeThread();
-
-    expect(
-      deriveInteractionSoundCues(captureThreadSoundState([thread]), [
-        makeThread({ hasPendingUserInput: true }),
-      ]),
-    ).toEqual(["bloom"]);
-  });
-
-  it("plays bloom when a thread starts requesting approval", () => {
-    const thread = makeThread();
-
-    expect(
-      deriveInteractionSoundCues(captureThreadSoundState([thread]), [
-        makeThread({ hasPendingApprovals: true }),
-      ]),
-    ).toEqual(["bloom"]);
-  });
-
-  it("plays bloom when pending input changes directly to pending approval", () => {
-    const pendingInput = makeThread({ hasPendingUserInput: true });
-    const pendingApproval = makeThread({ hasPendingApprovals: true });
-
-    expect(
-      deriveInteractionSoundCues(captureThreadSoundState([pendingInput]), [pendingApproval]),
-    ).toEqual(["bloom"]);
-  });
-
-  it("plays bloom when pending approval changes directly to pending input", () => {
-    const pendingApproval = makeThread({ hasPendingApprovals: true });
-    const pendingInput = makeThread({ hasPendingUserInput: true });
-
-    expect(
-      deriveInteractionSoundCues(captureThreadSoundState([pendingApproval]), [pendingInput]),
-    ).toEqual(["bloom"]);
-  });
-
-  it("does not replay cues for unchanged state", () => {
-    const thread = makeThread({
-      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      hasPendingUserInput: true,
-      hasPendingApprovals: true,
-      latestRun: makeRun({
-        status: "completed",
-        requestedAt: "2026-07-11T12:00:00.000Z",
-        startedAt: "2026-07-11T12:00:01.000Z",
-        completedAt: "2026-07-11T12:00:05.000Z",
-      }),
-    });
-
-    expect(deriveInteractionSoundCues(captureThreadSoundState([thread]), [thread])).toEqual([]);
-  });
-
-  it("does not replay success when a completed run timestamp is corrected", () => {
-    const completed = makeThread({
-      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestRun: makeRun({
-        status: "completed",
-        requestedAt: "2026-07-11T12:00:01.000Z",
-        startedAt: "2026-07-11T12:00:02.000Z",
-        completedAt: "2026-07-11T12:00:05.000Z",
-      }),
-    });
-    const corrected = makeThread({
-      latestUserMessageAt: completed.latestUserMessageAt,
-      latestRun: makeRun({
-        status: "completed",
-        requestedAt: "2026-07-11T12:00:01.000Z",
-        startedAt: "2026-07-11T12:00:02.000Z",
-        completedAt: "2026-07-11T12:00:06.000Z",
-      }),
-    });
-
-    expect(deriveInteractionSoundCues(captureThreadSoundState([completed]), [corrected])).toEqual(
-      [],
-    );
-  });
-
-  it("does not play cues while existing threads are first hydrated", () => {
-    const thread = makeThread({
-      hasPendingUserInput: true,
-      latestRun: makeRun({
-        status: "completed",
-        requestedAt: "2026-07-11T12:00:00.000Z",
-        startedAt: "2026-07-11T12:00:01.000Z",
-        completedAt: "2026-07-11T12:00:05.000Z",
-      }),
-    });
-
-    expect(deriveInteractionSoundCues(new Map(), [thread])).toEqual([]);
-  });
-
-  it("preserves pre-hydration thread state so cues can play after settings hydrate", () => {
-    const running = makeThread({
-      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestRun: makeRun({ status: "running", requestedAt: "2026-07-11T12:00:01.000Z" }),
-    });
-    const completed = makeThread({
-      latestUserMessageAt: running.latestUserMessageAt,
-      latestRun: makeRun({
-        status: "completed",
-        requestedAt: "2026-07-11T12:00:01.000Z",
-        completedAt: "2026-07-11T12:00:05.000Z",
-      }),
-    });
-
-    const seeded = captureThreadSoundStateWhileSettingsHydrating(null, [running]);
-    const frozen = captureThreadSoundStateWhileSettingsHydrating(seeded, [completed]);
-
-    expect(deriveInteractionSoundCues(frozen, [completed])).toEqual(["success"]);
-  });
-
-  it("preserves a thread baseline while its environment is synchronizing", () => {
-    const running = makeThread({
-      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestRun: makeRun({ status: "running", requestedAt: "2026-07-11T12:00:01.000Z" }),
-    });
-    const completedDuringSync = makeThread({
-      latestUserMessageAt: running.latestUserMessageAt,
-      latestRun: makeRun({
-        status: "completed",
-        requestedAt: "2026-07-11T12:00:01.000Z",
-        completedAt: "2026-07-11T12:00:05.000Z",
-      }),
-    });
-    const beforeSync = captureThreadSoundState([running]);
-    const whileSynchronizing = captureThreadSoundStatePreservingUnobserved(
-      beforeSync,
-      [],
-      [completedDuringSync],
-    );
-
-    expect(deriveInteractionSoundCues(whileSynchronizing, [completedDuringSync])).toEqual([
-      "success",
-    ]);
-  });
-
-  it("detects a user-input request received while its environment is synchronizing", () => {
+  it("plays bloom when a thread starts waiting for user input", () => {
     const idle = makeThread();
-    const pendingInputDuringSync = makeThread({ hasPendingUserInput: true });
-    const beforeSync = captureThreadSoundState([idle]);
-    const whileSynchronizing = captureThreadSoundStatePreservingUnobserved(
-      beforeSync,
-      [],
-      [pendingInputDuringSync],
-    );
-
-    expect(deriveInteractionSoundCues(whileSynchronizing, [pendingInputDuringSync])).toEqual([
+    const waiting = makeThread({ hasPendingUserInput: true });
+    expect(deriveInteractionSoundCues(captureThreadSoundState([idle]), [waiting])).toEqual([
       "bloom",
     ]);
-  });
-
-  it("drops retained baselines for threads that no longer exist", () => {
-    const thread = makeThread({ hasPendingUserInput: true });
-    const beforeRemoval = captureThreadSoundState([thread]);
-    const afterRemoval = captureThreadSoundStatePreservingUnobserved(beforeRemoval, [], []);
-
-    expect(afterRemoval.size).toBe(0);
-  });
-
-  it("admits newly seen threads while settings are hydrating", () => {
-    const seeded = captureThreadSoundStateWhileSettingsHydrating(null, []);
-    const withThread = captureThreadSoundStateWhileSettingsHydrating(seeded, [
-      makeThread({ hasPendingUserInput: true }),
-    ]);
-
-    expect(
-      deriveInteractionSoundCues(withThread, [makeThread({ hasPendingUserInput: true })]),
-    ).toEqual([]);
   });
 
   it("keeps input-request cues enabled when completion sounds are disabled", () => {
@@ -315,17 +155,181 @@ describe("interaction sounds", () => {
     expect(shouldPlayInteractionSound("bloom", false)).toBe(true);
   });
 
-  it("excludes cached thread shells until their environment is live", () => {
-    const cached = makeThread({ environmentId: EnvironmentId.make("cached-environment") });
-    const live = makeThread({
-      environmentId: EnvironmentId.make("live-environment"),
-      id: ThreadId.make("thread-2"),
+  it("freezes observation while settings hydrate then plays the completion cue", () => {
+    const running = makeThread({
+      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
+      latestRun: userRun({ status: "running" }),
+    });
+    const completed = makeThread({
+      latestUserMessageAt: running.latestUserMessageAt,
+      latestRun: userRun({
+        status: "completed",
+        completedAt: "2026-07-11T12:00:05.000Z",
+      }),
     });
 
-    expect(
-      selectLiveThreadShells([cached, live], new Set([live.environmentId])).map(
-        (thread) => thread.id,
-      ),
-    ).toEqual(["thread-2"]);
+    const seeded = observeThreadSoundState(null, running, {
+      environmentLive: true,
+      environmentPreviouslyLive: false,
+      settingsHydrated: false,
+    });
+    const frozen = observeThreadSoundState(seeded.state, completed, {
+      environmentLive: true,
+      environmentPreviouslyLive: true,
+      settingsHydrated: false,
+    });
+    const hydrated = observeThreadSoundState(frozen.state, completed, {
+      environmentLive: true,
+      environmentPreviouslyLive: true,
+      settingsHydrated: true,
+    });
+
+    expect(hydrated.cues).toEqual(["success"]);
+  });
+
+  it("preserves a thread baseline while its environment is synchronizing", () => {
+    const running = makeThread({
+      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
+      latestRun: userRun({ status: "running" }),
+    });
+    const completedDuringSync = makeThread({
+      latestUserMessageAt: running.latestUserMessageAt,
+      latestRun: userRun({
+        status: "completed",
+        completedAt: "2026-07-11T12:00:05.000Z",
+      }),
+    });
+    const beforeSync = captureThreadSoundState([running]);
+    const whileSynchronizing = observeThreadSoundState(beforeSync, completedDuringSync, {
+      environmentLive: false,
+      environmentPreviouslyLive: true,
+      settingsHydrated: true,
+    });
+    const reconnected = observeThreadSoundState(whileSynchronizing.state, completedDuringSync, {
+      environmentLive: true,
+      environmentPreviouslyLive: true,
+      settingsHydrated: true,
+    });
+
+    expect(reconnected.cues).toEqual(["success"]);
+  });
+
+  it("refreshes cached startup state until the environment first becomes live", () => {
+    const staleRunning = makeThread({
+      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
+      latestRun: userRun({ status: "running" }),
+    });
+    const refreshedCompleted = makeThread({
+      latestUserMessageAt: staleRunning.latestUserMessageAt,
+      latestRun: userRun({
+        status: "completed",
+        completedAt: "2026-07-11T12:00:05.000Z",
+      }),
+    });
+    const seeded = observeThreadSoundState(null, staleRunning, {
+      environmentLive: false,
+      environmentPreviouslyLive: false,
+      settingsHydrated: true,
+    });
+    const refreshed = observeThreadSoundState(seeded.state, refreshedCompleted, {
+      environmentLive: false,
+      environmentPreviouslyLive: false,
+      settingsHydrated: true,
+    });
+    const firstLive = observeThreadSoundState(refreshed.state, refreshedCompleted, {
+      environmentLive: true,
+      environmentPreviouslyLive: false,
+      settingsHydrated: true,
+    });
+
+    expect(firstLive.cues).toEqual([]);
+  });
+
+  it("plays later cues after the first live snapshot seeds the baseline", () => {
+    const running = makeThread({
+      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
+      latestRun: userRun({ status: "running" }),
+    });
+    const completed = makeThread({
+      latestUserMessageAt: running.latestUserMessageAt,
+      latestRun: userRun({
+        status: "completed",
+        completedAt: "2026-07-11T12:00:05.000Z",
+      }),
+    });
+    let environmentObservedLive = false;
+    const firstLive = observeThreadSoundState(null, running, {
+      environmentLive: true,
+      environmentPreviouslyLive: environmentObservedLive,
+      settingsHydrated: true,
+    });
+    environmentObservedLive = true;
+    const laterUpdate = observeThreadSoundState(firstLive.state, completed, {
+      environmentLive: true,
+      environmentPreviouslyLive: environmentObservedLive,
+      settingsHydrated: true,
+    });
+
+    expect(firstLive.cues).toEqual([]);
+    expect(laterUpdate.cues).toEqual(["success"]);
+  });
+
+  it("detects a user-input request received while its environment is synchronizing", () => {
+    const idle = makeThread();
+    const pendingInputDuringSync = makeThread({ hasPendingUserInput: true });
+    const beforeSync = captureThreadSoundState([idle]);
+    const whileSynchronizing = observeThreadSoundState(beforeSync, pendingInputDuringSync, {
+      environmentLive: false,
+      environmentPreviouslyLive: true,
+      settingsHydrated: true,
+    });
+    const reconnected = observeThreadSoundState(whileSynchronizing.state, pendingInputDuringSync, {
+      environmentLive: true,
+      environmentPreviouslyLive: true,
+      settingsHydrated: true,
+    });
+
+    expect(reconnected.cues).toEqual(["bloom"]);
+  });
+
+  it("compares a thread first discovered after reconnect with an idle baseline", () => {
+    const discovered = observeThreadSoundState(null, makeThread({ hasPendingUserInput: true }), {
+      environmentLive: true,
+      environmentPreviouslyLive: true,
+      settingsHydrated: true,
+    });
+
+    expect(discovered.cues).toEqual(["bloom"]);
+  });
+
+  it("plays completion for a thread first discovered after reconnect", () => {
+    const discovered = observeThreadSoundState(
+      null,
+      makeThread({
+        latestUserMessageAt: "2026-07-11T12:00:00.000Z",
+        latestRun: userRun({
+          runId: RunId.make("remote-run"),
+          status: "completed",
+          completedAt: "2026-07-11T12:00:05.000Z",
+        }),
+      }),
+      {
+        environmentLive: true,
+        environmentPreviouslyLive: true,
+        settingsHydrated: true,
+      },
+    );
+
+    expect(discovered.cues).toEqual(["success"]);
+  });
+
+  it("seeds a thread from the first live hydration without playing a cue", () => {
+    const discovered = observeThreadSoundState(null, makeThread({ hasPendingUserInput: true }), {
+      environmentLive: true,
+      environmentPreviouslyLive: false,
+      settingsHydrated: true,
+    });
+
+    expect(discovered.cues).toEqual([]);
   });
 });
