@@ -758,7 +758,8 @@ describe("ClaudeAdapterV2 attachments", () => {
         assert.deepEqual(offeredMessages[0]?.message.content, [
           {
             type: "text",
-            text: `Ultrathink:\nWhat's in this image?\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]`,
+            text: `Ultrathink:
+What's in this image?`,
           },
           expectedImageBlock,
         ]);
