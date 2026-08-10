@@ -751,10 +751,6 @@ describe("ClaudeAdapterV2 attachments", () => {
             data: "AQIDBA==",
           },
         } as const;
-        const expectedAttachmentPath = path.join(
-          attachmentsDir,
-          attachmentRelativePath(attachment),
-        );
         assert.deepEqual(offeredMessages[0]?.message.content, [
           {
             type: "text",
@@ -786,7 +782,7 @@ What's in this image?`,
         assert.deepEqual(offeredMessages[1]?.message.content, [
           {
             type: "text",
-            text: `Ultrathink:\nFocus on the diagram labels.\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]`,
+            text: `Ultrathink:\nFocus on the diagram labels.`,
           },
           expectedImageBlock,
         ]);

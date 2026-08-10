@@ -49,6 +49,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -1862,8 +1863,22 @@ function terminalStatusFromResult(
   return "failed";
 }
 
-function isClaudeActiveSteeringAbortResult(message: SDKResultMessage): boolean {
-  return message.terminal_reason === "aborted_streaming";
+// The CLI ends the native turn to take a steer and answers it in the next one,
+// so that first result hands off rather than ending the T3 turn. Recorded
+// shapes: mid-stream it aborts the stream and reports `aborted_streaming` on an
+// error result, mid-tool it aborts the tools and reports `aborted_tools` on a
+// clean success whose text is empty.
+function isClaudeSteeringHandoffResult(message: SDKResultMessage): boolean {
+  if (
+    message.terminal_reason === "aborted_streaming" ||
+    message.terminal_reason === "aborted_tools"
+  ) {
+    return message.subtype !== "success" || message.is_error || message.result.trim().length === 0;
+  }
+  if (message.terminal_reason !== undefined && message.terminal_reason !== "completed") {
+    return false;
+  }
+  return message.subtype === "success" && !message.is_error && message.result.trim().length === 0;
 }
 
 function isClaudeProviderContinuationTurn(input: ProviderAdapterV2TurnInput): boolean {
@@ -2071,6 +2086,8 @@ const MAX_CLAUDE_SUBAGENT_STREAMED_TEXTS = 16;
 const MAX_CLAUDE_SUBAGENT_TERMINAL_NATIVE_ITEM_IDS = 32;
 const MAX_CLAUDE_SUBAGENT_TERMINAL_TEXTS = 16;
 const CLAUDE_SUBAGENT_WAKE_DELIVERY_FAILURE = "Background task completion could not be delivered.";
+const CLAUDE_STRANDED_OUTPUT_FALLBACK_TIMEOUT = Duration.seconds(2);
+const CLAUDE_STEERING_HANDOFF_TIMEOUT = Duration.seconds(60);
 const CLAUDE_SUBAGENT_SESSION_ENDED_FAILURE =
   "Background task ended when its Claude session closed.";
 
@@ -2241,7 +2258,12 @@ export function makeClaudeAdapterV2(
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
-        const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
+        const steeredTurns = yield* Ref.make(new Map<OrchestrationV2ProviderTurn["id"], number>());
+        // Frames seen per provider turn, so a swallowed handoff can tell "the
+        // steered turn started" from "the CLI went silent".
+        const turnFrameCounts = yield* Ref.make(
+          new Map<OrchestrationV2ProviderTurn["id"], number>(),
+        );
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const itemOrdinals = yield* Ref.make(new Map<string, number>());
@@ -2309,6 +2331,7 @@ export function makeClaudeAdapterV2(
         const failedWakeDrainByNativeThread = yield* Ref.make(
           new Map<string, ReadonlySet<string>>(),
         );
+        const strandedOutputFallbackTokens = yield* Ref.make(new Map<string, object>());
         const sdkMessagePermit = yield* Semaphore.make(1);
         const runtimeContext = yield* Effect.context<never>();
         const runFork = Effect.runForkWith(runtimeContext);
@@ -2621,6 +2644,27 @@ export function makeClaudeAdapterV2(
         // After the first idle opaque notification is buffered/offered: stop
         // further wake buffering for this task id, but keep a replay tombstone
         // until the continuation drain classifies the buffered notification.
+        const hasWakeEligibleBackgroundWorkOnNativeThread = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+        ) {
+          const opaqueTasks = taskIdSetForNativeThread(
+            yield* Ref.get(wakeEligibleBackgroundTasksByNativeThread),
+            nativeThreadId,
+          );
+          if (opaqueTasks.size > 0) {
+            return true;
+          }
+          const nativeThreadState = (yield* Ref.get(sessionSubagents)).byNativeThreadId.get(
+            nativeThreadId,
+          );
+          for (const subagent of nativeThreadState?.subagentsByTaskId.values() ?? []) {
+            if (subagent.task.status === "running") {
+              return true;
+            }
+          }
+          return false;
+        });
+
         const consumeWakeEligibilityForBufferedNotification = (
           nativeThreadId: string,
           taskId: string,
@@ -4385,7 +4429,12 @@ export function makeClaudeAdapterV2(
             return next;
           });
           yield* Ref.update(steeredTurns, (current) => {
-            const next = new Set(current);
+            const next = new Map(current);
+            next.delete(input.context.providerTurnId);
+            return next;
+          });
+          yield* Ref.update(turnFrameCounts, (current) => {
+            const next = new Map(current);
             next.delete(input.context.providerTurnId);
             return next;
           });
@@ -4552,6 +4601,50 @@ export function makeClaudeAdapterV2(
           }
         });
 
+        const boundSteeringHandoff = Effect.fnUntraced(function* (
+          context: ActiveClaudeTurnContext,
+        ) {
+          const framesAtHandoff =
+            (yield* Ref.get(turnFrameCounts)).get(context.providerTurnId) ?? 0;
+          yield* Effect.gen(function* () {
+            yield* Effect.sleep(CLAUDE_STEERING_HANDOFF_TIMEOUT);
+            const current = yield* Ref.get(activeTurn);
+            if (current?.providerTurnId !== context.providerTurnId) {
+              return;
+            }
+            // Claim the settle in one update, so overlapping bounds from
+            // several steers on the same turn cannot both finalize it.
+            const claimed = yield* Ref.modify(turnFrameCounts, (counts) => {
+              const framesNow = counts.get(context.providerTurnId) ?? 0;
+              if (framesNow !== framesAtHandoff) {
+                return [false, counts] as const;
+              }
+              const next = new Map(counts);
+              next.delete(context.providerTurnId);
+              return [true, next] as const;
+            });
+            if (!claimed) {
+              return;
+            }
+            yield* Effect.logWarning("orchestration-v2.claude-steer-handoff-timeout", {
+              providerSessionId: input.providerSessionId,
+              providerThreadId: context.input.providerThread.id,
+              providerTurnId: context.providerTurnId,
+            });
+            const completedAt = yield* DateTime.now;
+            yield* finalizeActiveTurn({
+              context,
+              status: "failed",
+              completedAt,
+              failure: makeProviderFailure({
+                message: "Claude accepted the steer but never opened a turn to answer it.",
+                code: "steer_handoff_timeout",
+                class: "transport_error",
+              }),
+            });
+          }).pipe(Effect.forkIn(sessionScope));
+        });
+
         const offerBufferedContinuation = Effect.fnUntraced(function* (nativeThreadId: string) {
           const route = (yield* Ref.get(lastTurnRouteByNativeThread)).get(nativeThreadId);
           if (route === undefined) {
@@ -4690,6 +4783,44 @@ export function makeClaudeAdapterV2(
             dispatchIfCurrent: dispatchContinuationIfCurrent,
             failIfCurrent: failContinuationIfCurrent,
           });
+        });
+
+        const scheduleStrandedOutputFallback = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+        ) {
+          const token = {};
+          const shouldSchedule = yield* Ref.modify(strandedOutputFallbackTokens, (current) => {
+            if (current.has(nativeThreadId)) {
+              return [false, current] as const;
+            }
+            return [true, new Map(current).set(nativeThreadId, token)] as const;
+          });
+          if (!shouldSchedule) {
+            return;
+          }
+          yield* Effect.gen(function* () {
+            yield* Effect.sleep(CLAUDE_STRANDED_OUTPUT_FALLBACK_TIMEOUT);
+            const ownsFallback = yield* Ref.modify(strandedOutputFallbackTokens, (current) => {
+              if (current.get(nativeThreadId) !== token) {
+                return [false, current] as const;
+              }
+              const updated = new Map(current);
+              updated.delete(nativeThreadId);
+              return [true, updated] as const;
+            });
+            if (!ownsFallback) {
+              return;
+            }
+            const buffered = (yield* Ref.get(wakeBuffers)).get(nativeThreadId);
+            const stillHasStrandedOutput =
+              buffered?.messages.some(
+                (entry) => (assistantTextFromSdkMessage(entry)?.text.length ?? 0) > 0,
+              ) ?? false;
+            if (!stillHasStrandedOutput) {
+              return;
+            }
+            yield* offerBufferedContinuation(nativeThreadId);
+          }).pipe(Effect.forkIn(sessionScope));
         });
 
         const bufferWakeMessage: (wakeInput: {
@@ -4872,13 +5003,31 @@ export function makeClaudeAdapterV2(
             buffered?.messages.some(
               (entry) => entry.type === "system" && entry.subtype === "task_notification",
             ) ?? false;
+          const hasBufferedStrandedOutput =
+            buffered?.messages.some(
+              (entry) => (assistantTextFromSdkMessage(entry)?.text.length ?? 0) > 0,
+            ) ?? false;
           const isNativeOpaqueWakeFrame =
             hasBufferedNotification && (message.type === "assistant" || message.type === "user");
+          const isStrandedNativeOutput =
+            (assistantTextFromSdkMessage(message)?.text.length ?? 0) > 0;
+          const isNotificationForBufferedOutput =
+            isPendingTaskNotification && hasBufferedStrandedOutput;
           if (
             !isPendingSubagentNotification &&
+            !isNotificationForBufferedOutput &&
             !isNativeOpaqueWakeFrame &&
+            !isStrandedNativeOutput &&
             message.type !== "result"
           ) {
+            return;
+          }
+          if (
+            isStrandedNativeOutput &&
+            !hasBufferedNotification &&
+            (yield* hasWakeEligibleBackgroundWorkOnNativeThread(wakeInput.nativeThreadId))
+          ) {
+            yield* scheduleStrandedOutputFallback(wakeInput.nativeThreadId);
             return;
           }
           yield* offerBufferedContinuation(wakeInput.nativeThreadId);
@@ -4999,6 +5148,12 @@ export function makeClaudeAdapterV2(
             }
             return;
           }
+
+          yield* Ref.update(turnFrameCounts, (current) => {
+            const updated = new Map(current);
+            updated.set(context.providerTurnId, (updated.get(context.providerTurnId) ?? 0) + 1);
+            return updated;
+          });
 
           const failedWakeTaskIds = (yield* Ref.get(failedWakeDrainByNativeThread)).get(
             context.nativeThreadId,
@@ -5489,12 +5644,27 @@ export function makeClaudeAdapterV2(
           if (message.type === "result") {
             const completedAt = yield* DateTime.now;
             const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
-            const wasSteered = (yield* Ref.get(steeredTurns)).has(context.providerTurnId);
-            if (!interrupted && wasSteered && isClaudeActiveSteeringAbortResult(message)) {
+            const pendingSteers = (yield* Ref.get(steeredTurns)).get(context.providerTurnId) ?? 0;
+            if (!interrupted && pendingSteers > 0 && isClaudeSteeringHandoffResult(message)) {
+              yield* Ref.update(steeredTurns, (current) => {
+                const next = new Map(current);
+                if (pendingSteers <= 1) {
+                  next.delete(context.providerTurnId);
+                } else {
+                  next.set(context.providerTurnId, pendingSteers - 1);
+                }
+                return next;
+              });
+              yield* boundSteeringHandoff(context);
               return;
             }
             yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
+              const next = new Map(current);
+              next.delete(context.providerTurnId);
+              return next;
+            });
+            yield* Ref.update(turnFrameCounts, (current) => {
+              const next = new Map(current);
               next.delete(context.providerTurnId);
               return next;
             });
@@ -6082,8 +6252,8 @@ export function makeClaudeAdapterV2(
               fileSystem,
             });
             yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.add(turnInput.providerTurnId);
+              const next = new Map(current);
+              next.set(turnInput.providerTurnId, (next.get(turnInput.providerTurnId) ?? 0) + 1);
               return next;
             });
             yield* existing.query.offer(userMessage);
@@ -6128,6 +6298,8 @@ export function makeClaudeAdapterV2(
               yield* Ref.set(wakeBuffers, new Map());
               yield* Ref.set(continuationStateByNativeThread, new Map());
               yield* Ref.set(failedWakeDrainByNativeThread, new Map());
+              yield* Ref.set(strandedOutputFallbackTokens, new Map());
+              yield* Ref.set(turnFrameCounts, new Map());
               yield* Ref.set(pendingBackgroundTasksByNativeThread, new Map());
               yield* Ref.set(wakeEligibleBackgroundTasksByNativeThread, new Map());
               yield* Ref.set(opaqueBackgroundTaskReplayTombstonesByNativeThread, new Map());
