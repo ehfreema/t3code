@@ -1458,7 +1458,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 `;
                 break;
               }
-case "run.created":
+              case "run.created":
               case "run.updated": {
                 const payloadJson = yield* encodeRunPayload(event.payload);
                 const payload = parseEncodedPayload(payloadJson);
