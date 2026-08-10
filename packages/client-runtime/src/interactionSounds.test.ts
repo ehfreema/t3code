@@ -61,6 +61,7 @@ function makeThread(overrides: Partial<EnvironmentThreadShell> = {}): Environmen
     snoozedUntil: null,
     snoozedAt: null,
     pinnedAt: null,
+    pinOrderKey: null,
     titleRegeneration: null,
     deletedAt: null,
     source: {} as EnvironmentThreadShell["source"],
