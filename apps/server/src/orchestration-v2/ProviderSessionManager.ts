@@ -219,6 +219,10 @@ interface LiveSessionEntry {
   >;
   /** Start calls do not complete until the event pump observes their running turn. */
   readonly startTurnObservations: Ref.Ref<ReadonlyMap<string, Deferred.Deferred<void>>>;
+  /** Busy start attempts, bound to their provider turn after the pump observes it. */
+  readonly busyStartAttempts: Ref.Ref<
+    ReadonlyMap<string, OrchestrationV2ProviderTurn["id"] | null>
+  >;
   readonly scope: Scope.Closeable;
   readonly idleGeneration: number;
   readonly busyCount: number;
@@ -255,6 +259,12 @@ export interface ProviderSessionManagerV2LayerOptions {
   ) => Effect.Effect<void>;
   /** Test hook that parks a stale archive detach before its guarded restoration. */
   readonly beforeStaleArchiveRestore?: Effect.Effect<void>;
+  /** Test hook that runs after a runtime operation is admitted but before it starts. */
+  readonly afterRuntimeOperationAdmission?: (
+    runtime: ProviderAdapterV2SessionRuntime,
+  ) => Effect.Effect<void>;
+  /** Test hook that parks operation completion before its idle generation is rearmed. */
+  readonly beforeRuntimeOperationIdleRearm?: Effect.Effect<void>;
 }
 
 function releaseStatusFor(
@@ -746,6 +756,7 @@ export const layerWithOptions = (
           input.providerSessionId,
           Effect.uninterruptible(
             Effect.gen(function* () {
+              const operationGates = yield* Ref.get(sessionOperationGates);
               const entry = yield* Ref.modify(sessions, (current) => {
                 const key = sessionKey(input.providerSessionId);
                 const existing = current.get(key);
@@ -754,7 +765,9 @@ export const layerWithOptions = (
                 }
                 if (
                   input.onlyIfIdleGeneration !== undefined &&
-                  (existing.busyCount > 0 || existing.idleGeneration !== input.onlyIfIdleGeneration)
+                  (existing.busyCount > 0 ||
+                    existing.idleGeneration !== input.onlyIfIdleGeneration ||
+                    (operationGates.get(existing.runtime)?.active ?? 0) > 0)
                 ) {
                   return [Option.none<LiveSessionEntry>(), current] as const;
                 }
@@ -1292,6 +1305,23 @@ export const layerWithOptions = (
           }),
         );
 
+      const releaseBusyStartAttempt = (
+        busyStartAttempts: LiveSessionEntry["busyStartAttempts"],
+        matches: (
+          attemptKey: string,
+          providerTurnId: OrchestrationV2ProviderTurn["id"] | null,
+        ) => boolean,
+      ) =>
+        Ref.modify(busyStartAttempts, (current) => {
+          const match = [...current].find(([attemptKey, providerTurnId]) =>
+            matches(attemptKey, providerTurnId),
+          );
+          if (match === undefined) return [false, current] as const;
+          const updated = new Map(current);
+          updated.delete(match[0]);
+          return [true, updated] as const;
+        });
+
       const observeActivity = (
         providerSessionId: ProviderSessionId,
         activity: Effect.Effect<void, ProviderSessionActivityError>,
@@ -1347,42 +1377,69 @@ export const layerWithOptions = (
         runtime: ProviderAdapterV2SessionRuntime,
         allowDuringDrain = false,
       ) =>
-        Ref.modify(sessionOperationGates, (current) => {
-          const existing = current.get(runtime);
-          const canBegin =
-            existing === undefined ||
-            existing.phase === "open" ||
-            (allowDuringDrain && existing.phase === "draining");
-          if (!canBegin) return [false, current] as const;
-          const updated = new Map(current);
-          updated.set(runtime, {
-            phase: existing?.phase ?? "open",
-            active: (existing?.active ?? 0) + 1,
-            ...(existing?.drained === undefined ? {} : { drained: existing.drained }),
-          });
-          return [true, updated] as const;
-        });
+        sessionLifecycle.withLock(
+          runtime.providerSessionId,
+          Ref.modify(sessionOperationGates, (current) => {
+            const existing = current.get(runtime);
+            const canBegin =
+              existing === undefined ||
+              existing.phase === "open" ||
+              (allowDuringDrain && existing.phase === "draining");
+            if (!canBegin) return [false, current] as const;
+            const updated = new Map(current);
+            updated.set(runtime, {
+              phase: existing?.phase ?? "open",
+              active: (existing?.active ?? 0) + 1,
+              ...(existing?.drained === undefined ? {} : { drained: existing.drained }),
+            });
+            return [true, updated] as const;
+          }),
+        );
 
       const endRuntimeOperation = (runtime: ProviderAdapterV2SessionRuntime) =>
-        Ref.modify(sessionOperationGates, (current) => {
-          const existing = current.get(runtime);
-          if (existing === undefined) {
-            return [undefined, current] as const;
-          }
-          const active = Math.max(0, existing.active - 1);
-          const updated = new Map(current);
-          if (active === 0 && existing.phase === "open") {
-            updated.delete(runtime);
-          } else {
-            updated.set(runtime, { ...existing, active });
-          }
-          return [active === 0 ? existing.drained : undefined, updated] as const;
-        }).pipe(
-          Effect.flatMap((drained) =>
-            drained === undefined ? Effect.void : Deferred.succeed(drained, undefined),
-          ),
-          Effect.asVoid,
-        );
+        sessionLifecycle
+          .withLock(
+            runtime.providerSessionId,
+            Ref.modify(sessionOperationGates, (current) => {
+              const existing = current.get(runtime);
+              if (existing === undefined) {
+                return [{ drained: undefined, scheduleIdle: false }, current] as const;
+              }
+              const active = Math.max(0, existing.active - 1);
+              const updated = new Map(current);
+              if (active === 0 && existing.phase === "open") {
+                updated.delete(runtime);
+              } else {
+                updated.set(runtime, { ...existing, active });
+              }
+              return [
+                {
+                  drained: active === 0 ? existing.drained : undefined,
+                  scheduleIdle: active === 0 && existing.phase === "open",
+                },
+                updated,
+              ] as const;
+            }).pipe(
+              Effect.flatMap(({ drained, scheduleIdle }) =>
+                Effect.all(
+                  [
+                    ...(drained === undefined ? [] : [Deferred.succeed(drained, undefined)]),
+                    ...(scheduleIdle
+                      ? [
+                          (options.beforeRuntimeOperationIdleRearm ?? Effect.void).pipe(
+                            Effect.andThen(
+                              scheduleIdleReleaseInternal(runtime.providerSessionId, runtime),
+                            ),
+                          ),
+                        ]
+                      : []),
+                  ],
+                  { discard: true },
+                ),
+              ),
+            ),
+          )
+          .pipe(Effect.asVoid);
 
       const markRuntimeDraining = (runtime: ProviderAdapterV2SessionRuntime) =>
         Ref.update(sessionOperationGates, (current) => {
@@ -1427,6 +1484,7 @@ export const layerWithOptions = (
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
         startTurnObservations: Ref.Ref<ReadonlyMap<string, Deferred.Deferred<void>>>,
+        busyStartAttempts: LiveSessionEntry["busyStartAttempts"],
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
@@ -1454,7 +1512,10 @@ export const layerWithOptions = (
                 ? Ref.get(sessions).pipe(
                     Effect.flatMap((current) =>
                       current.get(sessionKey(providerSessionId))?.runtime === runtime
-                        ? effect.pipe(Effect.flatMap(ensureRuntimeStillActive))
+                        ? (options.afterRuntimeOperationAdmission?.(runtime) ?? Effect.void).pipe(
+                            Effect.andThen(effect),
+                            Effect.flatMap(ensureRuntimeStillActive),
+                          )
                         : Effect.fail(
                             new ProviderAdapterProtocolError({
                               driver: runtime.driver,
@@ -1610,27 +1671,82 @@ export const layerWithOptions = (
                   }),
                 ).pipe(
                   Effect.andThen(
+                    Ref.update(busyStartAttempts, (current) => {
+                      const updated = new Map(current);
+                      updated.set(attemptKey, null);
+                      return updated;
+                    }),
+                  ),
+                  Effect.andThen(
                     observeActivity(providerSessionId, markBusy(providerSessionId, runtime)),
                   ),
-                  Effect.andThen(runtime.startTurn(input)),
+                  Effect.andThen(
+                    runtime.startTurn(input).pipe(
+                      Effect.onExit((exit) =>
+                        Exit.isSuccess(exit)
+                          ? Effect.void
+                          : releaseBusyStartAttempt(
+                              busyStartAttempts,
+                              (candidateAttemptKey, providerTurnId) =>
+                                candidateAttemptKey === attemptKey && providerTurnId === null,
+                            ).pipe(
+                              Effect.flatMap((released) =>
+                                released
+                                  ? releaseEntry({
+                                      providerSessionId,
+                                      reason: "runtime_error",
+                                      detail: `Provider session ${providerSessionId} start exited before observing turn ${input.attemptId}`,
+                                      onlyIfRuntime: runtime,
+                                    }).pipe(
+                                      Effect.catchCause((cause) =>
+                                        Effect.logWarning(
+                                          "orchestration-v2.provider-session-start-exit-release-failed",
+                                          {
+                                            providerSessionId,
+                                            attemptId: input.attemptId,
+                                            cause,
+                                          },
+                                        ),
+                                      ),
+                                    )
+                                  : Effect.void,
+                              ),
+                            ),
+                      ),
+                    ),
+                  ),
                   Effect.andThen(
                     Deferred.await(observed).pipe(
                       Effect.timeoutOption(runtimeOperationDrainTimeoutMs),
                       Effect.flatMap((completed) =>
                         Option.isSome(completed)
                           ? Effect.void
-                          : Effect.fail(
-                              new ProviderAdapterProtocolError({
-                                driver: runtime.driver,
-                                detail: `Provider session ${providerSessionId} did not observe started turn ${input.attemptId}`,
-                              }),
+                          : releaseEntry({
+                              providerSessionId,
+                              reason: "runtime_error",
+                              detail: `Provider session ${providerSessionId} did not observe started turn ${input.attemptId}`,
+                              onlyIfRuntime: runtime,
+                            }).pipe(
+                              Effect.catchCause((cause) =>
+                                Effect.logWarning(
+                                  "orchestration-v2.provider-session-start-observation-release-failed",
+                                  {
+                                    providerSessionId,
+                                    attemptId: input.attemptId,
+                                    cause,
+                                  },
+                                ),
+                              ),
+                              Effect.andThen(
+                                Effect.fail(
+                                  new ProviderAdapterProtocolError({
+                                    driver: runtime.driver,
+                                    detail: `Provider session ${providerSessionId} did not observe started turn ${input.attemptId}`,
+                                  }),
+                                ),
+                              ),
                             ),
                       ),
-                    ),
-                  ),
-                  Effect.catch((error) =>
-                    observeActivity(providerSessionId, markIdle(providerSessionId, runtime)).pipe(
-                      Effect.andThen(Effect.fail(error)),
                     ),
                   ),
                   Effect.ensuring(
@@ -1710,6 +1826,15 @@ export const layerWithOptions = (
         Effect.gen(function* () {
           if (event.type === "provider_turn.updated") {
             const providerTurn = event.providerTurn;
+            if (providerTurn.status !== "pending" && providerTurn.runAttemptId !== null) {
+              const attemptKey = String(providerTurn.runAttemptId);
+              yield* Ref.update(entry.busyStartAttempts, (current) => {
+                if (!current.has(attemptKey)) return current;
+                const updated = new Map(current);
+                updated.set(attemptKey, providerTurn.id);
+                return updated;
+              });
+            }
             yield* Ref.update(entry.activeProviderTurns, (current) => {
               const updated = new Map(current);
               if (providerTurn.status === "running") {
@@ -1744,6 +1869,15 @@ export const layerWithOptions = (
               updated.delete(event.providerTurnId);
               return updated;
             });
+            const released = yield* releaseBusyStartAttempt(
+              entry.busyStartAttempts,
+              (_attemptKey, providerTurnId) => providerTurnId === event.providerTurnId,
+            );
+            if (!released) return;
+            yield* observeActivity(
+              entry.runtime.providerSessionId,
+              markIdle(entry.runtime.providerSessionId, entry.runtime),
+            );
           }
         });
 
@@ -1770,7 +1904,7 @@ export const layerWithOptions = (
                   observeActivity(
                     entry.runtime.providerSessionId,
                     event.type === "turn.terminal"
-                      ? markIdle(entry.runtime.providerSessionId, entry.runtime)
+                      ? Effect.void
                       : touchActivity(entry.runtime.providerSessionId, entry.runtime),
                   ),
                 ),
@@ -2001,10 +2135,14 @@ export const layerWithOptions = (
                 const startTurnObservations = yield* Ref.make<
                   ReadonlyMap<string, Deferred.Deferred<void>>
                 >(new Map());
+                const busyStartAttempts = yield* Ref.make<
+                  ReadonlyMap<string, OrchestrationV2ProviderTurn["id"] | null>
+                >(new Map());
                 const exposedRuntime = decorateRuntime(
                   runtime,
                   eventSubscribers,
                   startTurnObservations,
+                  busyStartAttempts,
                 );
                 const now = yield* Clock.currentTimeMillis;
                 const openedEntry: LiveSessionEntry = {
@@ -2023,6 +2161,7 @@ export const layerWithOptions = (
                   eventSubscribers,
                   activeProviderTurns,
                   startTurnObservations,
+                  busyStartAttempts,
                   scope: sessionScope,
                   idleGeneration: 0,
                   busyCount: 0,
