@@ -2331,7 +2331,7 @@ it.effect("ProviderSessionManagerV2 deletes detached historical native threads",
         detail: "Thread deleted.",
         deleteProviderThread: true,
         providerInstanceId: modelSelection.instanceId,
-        providerSession,
+        providerSessionCwd: providerSession.cwd,
         providerThreads: [providerThread],
       });
 
@@ -2377,7 +2377,7 @@ it.effect("ProviderSessionManagerV2 reports detached native deletion after clean
           deleteProviderThread: true,
           revokeMcpCredential: true,
           providerInstanceId: modelSelection.instanceId,
-          providerSession: makeProviderSession({ providerSessionId, now }),
+          providerSessionCwd: process.cwd(),
           providerThreads: [makeProviderThread({ idAllocator, threadId, providerSessionId, now })],
         })
         .pipe(Effect.flip);

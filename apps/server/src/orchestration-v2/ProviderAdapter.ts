@@ -53,6 +53,11 @@ export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
 });
 export type ProviderAdapterV2RuntimePolicy = typeof ProviderAdapterV2RuntimePolicy.Type;
 
+export type ProviderAdapterV2DetachedSession = Pick<
+  OrchestrationV2ProviderSession,
+  "id" | "driver" | "providerInstanceId" | "cwd"
+>;
+
 export const ProviderAdapterV2TurnMessage = Schema.Struct({
   messageId: MessageId,
   text: Schema.String,
@@ -541,7 +546,7 @@ export interface ProviderAdapterV2Shape {
    * alive. The caller supplies a scope for any temporary provider connection.
    */
   readonly deleteDetachedThread?: (input: {
-    readonly providerSession: OrchestrationV2ProviderSession;
+    readonly providerSession: ProviderAdapterV2DetachedSession;
     readonly providerThread: OrchestrationV2ProviderThread;
   }) => Effect.Effect<void, ProviderAdapterV2Error, Scope.Scope>;
   readonly getCapabilities: () => Effect.Effect<

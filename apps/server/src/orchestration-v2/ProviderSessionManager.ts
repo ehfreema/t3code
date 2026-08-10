@@ -6,6 +6,7 @@ import {
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderTurnId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -34,6 +35,7 @@ import {
   ProviderAdapterEventStreamError,
   ProviderAdapterProtocolError,
   ProviderAdapterV2RuntimePolicy,
+  type ProviderAdapterV2DetachedSession,
   type ProviderAdapterV2Error,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2EventSubscription,
@@ -176,6 +178,8 @@ export interface ProviderSessionManagerV2Shape {
      */
     readonly providerInstanceId?: ProviderInstanceId;
     readonly providerSession?: OrchestrationV2ProviderSession;
+    /** Working directory for native deletion after the session projection is gone. */
+    readonly providerSessionCwd?: string;
     readonly providerThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
     /** Persisted effects require an incarnation token before touching a live entry. */
     readonly requireExpectedRuntime?: boolean;
@@ -1341,6 +1345,25 @@ export const layerWithOptions = (
           Effect.asVoid,
         );
 
+      const ensureRuntimeOperationCanStart = (
+        runtime: ProviderAdapterV2SessionRuntime,
+        allowDuringDrain: boolean,
+      ) =>
+        Ref.get(sessionOperationGates).pipe(
+          Effect.flatMap((current) => {
+            const phase = current.get(runtime)?.phase ?? "open";
+            if (phase === "open" || (allowDuringDrain && phase === "draining")) {
+              return Effect.void;
+            }
+            return Effect.fail(
+              new ProviderAdapterProtocolError({
+                driver: runtime.driver,
+                detail: `Provider session ${runtime.providerSessionId} is detaching`,
+              }),
+            );
+          }),
+        );
+
       const markRuntimeDraining = (runtime: ProviderAdapterV2SessionRuntime) =>
         Ref.update(sessionOperationGates, (current) => {
           const existing = current.get(runtime);
@@ -1410,7 +1433,9 @@ export const layerWithOptions = (
                 ? Ref.get(sessions).pipe(
                     Effect.flatMap((current) =>
                       current.get(sessionKey(providerSessionId))?.runtime === runtime
-                        ? effect.pipe(Effect.flatMap(ensureRuntimeStillActive))
+                        ? ensureRuntimeOperationCanStart(runtime, allowDuringDrain).pipe(
+                            Effect.andThen(effect.pipe(Effect.flatMap(ensureRuntimeStillActive))),
+                          )
                         : Effect.fail(
                             new ProviderAdapterProtocolError({
                               driver: runtime.driver,
@@ -1974,6 +1999,7 @@ export const layerWithOptions = (
           let detachedRelease:
             | { readonly input: ReleaseEntryInput; readonly state: ReleaseEntryState }
             | undefined;
+          const interruptedProviderTurnIds = new Set<ProviderTurnId>();
           return Effect.gen(function* () {
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
@@ -2022,14 +2048,25 @@ export const layerWithOptions = (
             let deletionFailure: Exit.Exit<void, ProviderAdapterV2Error> | null = null;
             let nativeDeletionAttempted = false;
             const deleteDetachedProviderThreads = Effect.gen(function* () {
-              if (input.providerInstanceId === undefined || input.providerSession === undefined) {
+              if (input.providerInstanceId === undefined || providerThreads.size === 0) {
                 return null;
               }
+              const firstProviderThread = providerThreads.values().next().value;
+              const providerSession: ProviderAdapterV2DetachedSession | undefined =
+                input.providerSession ??
+                (input.providerSessionCwd !== undefined && firstProviderThread !== undefined
+                  ? {
+                      id: input.providerSessionId,
+                      driver: firstProviderThread.driver,
+                      providerInstanceId: input.providerInstanceId,
+                      cwd: input.providerSessionCwd,
+                    }
+                  : undefined);
+              if (providerSession === undefined) return null;
               const adapterExit = yield* Effect.exit(registry.get(input.providerInstanceId));
               if (Exit.isSuccess(adapterExit)) {
                 const deleteDetachedThread = adapterExit.value.deleteDetachedThread;
                 if (deleteDetachedThread === undefined) return null;
-                const providerSession = input.providerSession;
                 const exits = yield* Effect.scoped(
                   Effect.forEach(providerThreads.values(), (providerThread) =>
                     Effect.exit(
@@ -2057,7 +2094,7 @@ export const layerWithOptions = (
               input.deleteProviderThread === true &&
               currentEntry === undefined &&
               input.providerInstanceId !== undefined &&
-              input.providerSession !== undefined
+              (input.providerSession !== undefined || input.providerSessionCwd !== undefined)
             ) {
               // Historical / retry detach: the live entry may already be gone
               // and the adapter may be unregistered. Wrap registry.get so a
@@ -2077,43 +2114,61 @@ export const layerWithOptions = (
                   );
                 }),
               );
-            if (
-              currentEntry !== undefined &&
-              capturedRuntime !== undefined &&
-              Option.isSome(projection) &&
-              (currentEntry.supportsMultipleProviderThreads ||
-                input.deleteProviderThread === true) &&
-              (yield* stillOwnsCapturedRuntime())
-            ) {
-              const activeTurns = projection.value.providerTurns.filter(
-                (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
-              );
-              yield* Effect.forEach(
-                activeTurns,
-                (turn) =>
-                  capturedRuntime
-                    .interruptTurn({
-                      providerThread: providerThreads.get(turn.providerThreadId)!,
-                      providerTurnId: turn.id,
-                    })
-                    .pipe(
-                      Effect.catchCause((cause) =>
-                        Effect.logWarning(
-                          "orchestration-v2.driver-session.detach-interrupt-failed",
-                          {
-                            providerSessionId: input.providerSessionId,
-                            threadId: input.threadId,
-                            providerTurnId: turn.id,
-                            cause,
-                          },
+            const interruptActiveTurns = (candidateProjection: typeof projection) =>
+              Effect.gen(function* () {
+                if (
+                  currentEntry === undefined ||
+                  capturedRuntime === undefined ||
+                  Option.isNone(candidateProjection) ||
+                  (!currentEntry.supportsMultipleProviderThreads &&
+                    input.deleteProviderThread !== true) ||
+                  !(yield* stillOwnsCapturedRuntime())
+                ) {
+                  return;
+                }
+                const activeTurns = candidateProjection.value.providerTurns.filter(
+                  (turn) =>
+                    turn.status === "running" &&
+                    providerThreads.has(turn.providerThreadId) &&
+                    !interruptedProviderTurnIds.has(turn.id),
+                );
+                yield* Effect.forEach(
+                  activeTurns,
+                  (turn) => {
+                    interruptedProviderTurnIds.add(turn.id);
+                    return capturedRuntime
+                      .interruptTurn({
+                        providerThread: providerThreads.get(turn.providerThreadId)!,
+                        providerTurnId: turn.id,
+                      })
+                      .pipe(
+                        Effect.catchCause((cause) =>
+                          Effect.logWarning(
+                            "orchestration-v2.driver-session.detach-interrupt-failed",
+                            {
+                              providerSessionId: input.providerSessionId,
+                              threadId: input.threadId,
+                              providerTurnId: turn.id,
+                              cause,
+                            },
+                          ),
                         ),
-                      ),
-                    ),
-                { concurrency: 1, discard: true },
-              );
-            }
+                      );
+                  },
+                  { concurrency: 1, discard: true },
+                );
+              });
+            yield* interruptActiveTurns(projection);
             if (capturedRuntime !== undefined) {
               const drained = yield* closeAndDrainRuntimeOperations(capturedRuntime);
+              // An operation admitted before draining can finish its setup after
+              // the first projection read. Re-read after the gate drains so a
+              // turn that appeared in that window is also interrupted.
+              if (shouldLoadProviderThreads) {
+                yield* interruptActiveTurns(
+                  yield* Effect.option(projectionStore.getThreadProjection(input.threadId)),
+                );
+              }
               if (!drained) {
                 const releaseInput = {
                   providerSessionId: input.providerSessionId,

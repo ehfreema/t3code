@@ -38,6 +38,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     /** Persisted deletion targets for retries after the managed runtime has stopped. */
     providerInstanceId: Schema.optional(ProviderInstanceId),
     providerSession: Schema.optional(OrchestrationV2ProviderSessionJson),
+    providerSessionCwd: Schema.optional(Schema.String),
     providerThreads: Schema.optional(Schema.Array(OrchestrationV2ProviderThreadJson)),
   }),
   Schema.Struct({

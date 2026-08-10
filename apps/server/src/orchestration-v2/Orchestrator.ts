@@ -1798,16 +1798,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .map((session) => session.id)
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
+    const detachedProviderThreadsBySessionId =
+      command.type === "thread.delete"
+        ? new Map(
+            projection.providerThreads
+              .filter(
+                (providerThread) =>
+                  providerThread.providerSessionId !== null &&
+                  providerThread.nativeThreadRef !== null,
+              )
+              .map((providerThread) => [providerThread.providerSessionId!, providerThread]),
+          )
+        : new Map();
+    for (const providerSessionId of detachedProviderThreadsBySessionId.keys()) {
+      detachSessionIds.add(providerSessionId);
+    }
     if (detachSessionIds.size > 0) {
-      const sessionsToDetach = projection.providerSessions.filter(
-        (session) =>
-          detachSessionIds.has(session.id) &&
-          (command.type === "thread.delete" ||
-            (session.status !== "stopped" && session.status !== "error")),
+      const activeProviderSessionIds = new Set(
+        projection.providerSessions.map((session) => session.id),
       );
+      const sessionsToDetach = [
+        ...projection.providerSessions
+          .filter(
+            (session) =>
+              detachSessionIds.has(session.id) &&
+              (command.type === "thread.delete" ||
+                (session.status !== "stopped" && session.status !== "error")),
+          )
+          .map((session) => ({ session, detached: false as const })),
+        ...Array.from(detachedProviderThreadsBySessionId.entries())
+          .filter(([providerSessionId]) => !activeProviderSessionIds.has(providerSessionId))
+          .map(([providerSessionId, providerThread]) => ({
+            session: {
+              id: providerSessionId,
+              driver: providerThread.driver,
+              providerInstanceId: providerThread.providerInstanceId,
+              status: "stopped" as const,
+            },
+            detached: true as const,
+          })),
+      ];
       yield* Effect.forEach(
         sessionsToDetach,
-        (session) =>
+        ({ session, detached }) =>
           Effect.gen(function* () {
             // Pending and materialized projection rows can share one native id.
             const providerThreads = Array.from(
@@ -1856,7 +1889,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               request: {
                 type: "provider-session.detach",
                 providerSessionId: session.id,
-                providerSession: session,
                 detail:
                   command.type === "thread.archive"
                     ? "Thread archived."
@@ -1880,6 +1912,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                       providerThreads,
                     }
                   : {}),
+                ...(detached
+                  ? { providerSessionCwd: thread.worktreePath ?? process.cwd() }
+                  : { providerSession: session }),
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);

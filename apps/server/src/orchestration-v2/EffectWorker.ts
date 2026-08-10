@@ -116,6 +116,9 @@ export const executorLayer: Layer.Layer<
                 ...(effect.request.providerSession === undefined
                   ? {}
                   : { providerSession: effect.request.providerSession }),
+                ...(effect.request.providerSessionCwd === undefined
+                  ? {}
+                  : { providerSessionCwd: effect.request.providerSessionCwd }),
                 ...(effect.request.providerThreads === undefined
                   ? {}
                   : { providerThreads: effect.request.providerThreads }),
