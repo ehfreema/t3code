@@ -1912,9 +1912,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                       providerThreads,
                     }
                   : {}),
-                ...(detached
-                  ? { providerSessionCwd: thread.worktreePath ?? process.cwd() }
-                  : { providerSession: session }),
+                ...(detached && thread.worktreePath !== null
+                  ? { providerSessionCwd: thread.worktreePath }
+                  : detached
+                    ? {}
+                    : { providerSession: session }),
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);

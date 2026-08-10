@@ -2377,7 +2377,7 @@ it.effect("ProviderSessionManagerV2 reports detached native deletion after clean
           deleteProviderThread: true,
           revokeMcpCredential: true,
           providerInstanceId: modelSelection.instanceId,
-          providerSessionCwd: process.cwd(),
+          providerSessionCwd: "/workspace",
           providerThreads: [makeProviderThread({ idAllocator, threadId, providerSessionId, now })],
         })
         .pipe(Effect.flip);
@@ -2393,6 +2393,46 @@ it.effect("ProviderSessionManagerV2 reports detached native deletion after clean
           idleTimeoutMs: 1_000,
           capabilities: ExclusiveCapabilities,
           failDetachedDeleteThread: true,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 does not guess a cwd for detached native deletion", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const idAllocator = yield* IdAllocatorV2;
+      const manager = yield* ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-detached-delete-missing-cwd",
+        projectId: yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-detached-delete-missing-cwd",
+        }),
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+
+      yield* manager.detach({
+        providerSessionId,
+        threadId,
+        deleteProviderThread: true,
+        providerInstanceId: modelSelection.instanceId,
+        providerThreads: [makeProviderThread({ idAllocator, threadId, providerSessionId, now })],
+      });
+
+      assert.equal((yield* Ref.get(state)).detachedDeleteCount, 0);
+    });
+
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 1_000,
         }),
       ),
     );

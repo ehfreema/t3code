@@ -2062,7 +2062,17 @@ export const layerWithOptions = (
                       cwd: input.providerSessionCwd,
                     }
                   : undefined);
-              if (providerSession === undefined) return null;
+              if (providerSession === undefined) {
+                yield* Effect.logWarning(
+                  "orchestration-v2.driver-session.detached-delete-missing-cwd",
+                  {
+                    providerSessionId: input.providerSessionId,
+                    threadId: input.threadId,
+                    providerInstanceId: input.providerInstanceId,
+                  },
+                );
+                return null;
+              }
               const adapterExit = yield* Effect.exit(registry.get(input.providerInstanceId));
               if (Exit.isSuccess(adapterExit)) {
                 const deleteDetachedThread = adapterExit.value.deleteDetachedThread;
@@ -2161,9 +2171,10 @@ export const layerWithOptions = (
             yield* interruptActiveTurns(projection);
             if (capturedRuntime !== undefined) {
               const drained = yield* closeAndDrainRuntimeOperations(capturedRuntime);
-              // An operation admitted before draining can finish its setup after
-              // the first projection read. Re-read after the gate drains so a
-              // turn that appeared in that window is also interrupted.
+              // The operation gate drains admitted fibers, while provider-turn
+              // projection events can arrive after those fibers finish. Re-read
+              // after the gate drains so a turn that appeared in that window is
+              // also interrupted.
               if (shouldLoadProviderThreads) {
                 yield* interruptActiveTurns(
                   yield* Effect.option(projectionStore.getThreadProjection(input.threadId)),
