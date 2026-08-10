@@ -38,9 +38,16 @@ const OPENCODE2_SESSION_TABLES = [
  * bridged in: next-line stores provider credentials in the sqlite `credential`
  * table (not only auth.json), and without that seed only free models appear.
  */
-export function openCode2ManagedStateRoot(environment: NodeJS.ProcessEnv = process.env): string {
+export function openCode2ManagedStateRoot(
+  environment: NodeJS.ProcessEnv = process.env,
+  instanceId?: string,
+): string {
   const home = environment.HOME?.trim() || NodeOS.homedir();
-  const userKey = NodeCrypto.createHash("sha256").update(home).digest("hex").slice(0, 12);
+  const identity = instanceId?.trim();
+  const userKey = NodeCrypto.createHash("sha256")
+    .update(identity === undefined ? home : `${home}\u0000${identity}`)
+    .digest("hex")
+    .slice(0, 12);
   return NodePath.join(
     environment.TMPDIR?.trim() || NodeOS.tmpdir(),
     `t3-opencode2-state-${userKey}`,
@@ -72,6 +79,47 @@ function isOwnedDirectory(stat: NodeFS.Stats): boolean {
   return uid === undefined || stat.uid === uid;
 }
 
+function isOwnedFile(stat: NodeFS.Stats): boolean {
+  if (!stat.isFile()) return false;
+  const uid = currentUserId();
+  return uid === undefined || stat.uid === uid;
+}
+
+function hardenManagedPath(path: string, directory: boolean, mode: number): boolean {
+  let fd: number | undefined;
+  try {
+    const flags =
+      NodeFS.constants.O_RDONLY |
+      (NodeFS.constants.O_NOFOLLOW ?? 0) |
+      (directory ? (NodeFS.constants.O_DIRECTORY ?? 0) : 0);
+    fd = NodeFS.openSync(path, flags);
+    const stat = NodeFS.fstatSync(fd);
+    if (directory ? !isOwnedDirectory(stat) : !isOwnedFile(stat)) return false;
+    NodeFS.fchmodSync(fd, mode);
+    return true;
+  } catch {
+    // Windows does not support all POSIX open flags. Fall back to the existing
+    // ownership check there; POSIX hosts use the descriptor-based path above.
+    if (NodeOS.platform() !== "win32") return false;
+    try {
+      const stat = NodeFS.lstatSync(path);
+      if (directory ? !isOwnedDirectory(stat) : !isOwnedFile(stat)) return false;
+      NodeFS.chmodSync(path, mode);
+      return true;
+    } catch {
+      return false;
+    }
+  } finally {
+    if (fd !== undefined) {
+      try {
+        NodeFS.closeSync(fd);
+      } catch {
+        // Descriptor cleanup is best effort after the mode change.
+      }
+    }
+  }
+}
+
 /**
  * Create or validate a directory that T3 writes to. `lstat` is intentional:
  * following a pre-existing symlink here would let a different local process
@@ -81,43 +129,52 @@ function ensureManagedDirectory(path: string): boolean {
   try {
     const existing = NodeFS.lstatSync(path);
     if (!isOwnedDirectory(existing)) return false;
-    try {
-      NodeFS.chmodSync(path, 0o700);
-    } catch {
-      return false;
-    }
-    return true;
+    return hardenManagedPath(path, true, 0o700);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
   }
 
   try {
     NodeFS.mkdirSync(path, { recursive: true, mode: 0o700 });
-    const created = NodeFS.lstatSync(path);
-    if (!isOwnedDirectory(created)) return false;
-    NodeFS.chmodSync(path, 0o700);
-    return true;
+    return hardenManagedPath(path, true, 0o700);
   } catch {
     return false;
   }
 }
 
-function migrateLegacyManagedStateRoot(stateRoot: string, environment: NodeJS.ProcessEnv): void {
-  if (managedFileState(stateRoot) !== "missing") return;
-  const legacyRoot = legacyOpenCode2ManagedStateRoot(environment);
-  if (legacyRoot === stateRoot) return;
-  let legacy: NodeFS.Stats;
+function migrateLegacyManagedStateRoot(
+  stateRoot: string,
+  environment: NodeJS.ProcessEnv,
+  instanceId?: string,
+): void {
   try {
-    legacy = NodeFS.lstatSync(legacyRoot);
-  } catch {
+    NodeFS.lstatSync(stateRoot);
     return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
   }
-  if (!isOwnedDirectory(legacy)) return;
-  try {
-    NodeFS.chmodSync(legacyRoot, 0o700);
-    NodeFS.renameSync(legacyRoot, stateRoot);
-  } catch {
-    // Another provider startup may have adopted or created the target first.
+  const legacyRoots = [legacyOpenCode2ManagedStateRoot(environment)];
+  // The user-scoped root was the current format before instance isolation.
+  // Migrate it only for the built-in instance. Moving it to every custom
+  // instance would copy one provider's live database into all instances.
+  if (instanceId?.trim() === "opencode2") {
+    legacyRoots.push(openCode2ManagedStateRoot(environment));
+  }
+  for (const legacyRoot of legacyRoots) {
+    if (legacyRoot === stateRoot) continue;
+    let legacy: NodeFS.Stats;
+    try {
+      legacy = NodeFS.lstatSync(legacyRoot);
+    } catch {
+      continue;
+    }
+    if (!isOwnedDirectory(legacy)) continue;
+    try {
+      NodeFS.renameSync(legacyRoot, stateRoot);
+      return;
+    } catch {
+      // Another provider startup may have adopted or created the target first.
+    }
   }
 }
 
@@ -171,14 +228,7 @@ function managedFileState(path: string): ManagedFileState {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unsafe";
   }
-  const uid = currentUserId();
-  if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) return "unsafe";
-  try {
-    NodeFS.chmodSync(path, 0o600);
-  } catch {
-    return "unsafe";
-  }
-  return "safe";
+  return isOwnedFile(stat) ? "safe" : "unsafe";
 }
 
 function copyManagedFile(source: string, target: string): void {
@@ -244,19 +294,33 @@ export function seedOpenCode2ManagedDataHome(
   // with an empty credential table remains the authoritative logout signal.
   if (!NodeFS.existsSync(hostDb)) return;
 
+  let temporaryDb: string | undefined;
+  const removeTemporaryDb = () => {
+    if (temporaryDb === undefined) return;
+    try {
+      NodeFS.unlinkSync(temporaryDb);
+    } catch {
+      // The file may already have been published or cleaned up.
+    }
+    temporaryDb = undefined;
+  };
   try {
     if (managedState === "missing") {
       // First managed spawn: take a transactionally consistent host snapshot
       // (VACUUM INTO, not a live main-db file copy without WAL companions),
       // then prune sessions so we keep credentials without replaying host chats.
+      temporaryDb = `${managedDb}.${process.pid}.${NodeCrypto.randomBytes(8).toString("hex")}.tmp`;
       const hostSnapshot = new NodeSqlite.DatabaseSync(hostDb, { readOnly: true });
       try {
-        hostSnapshot.exec(`VACUUM INTO ${sqlQuoteLiteral(managedDb)}`);
+        hostSnapshot.exec(`VACUUM INTO ${sqlQuoteLiteral(temporaryDb)}`);
       } finally {
         hostSnapshot.close();
       }
-      managedFileState(managedDb);
-      const db = new NodeSqlite.DatabaseSync(managedDb);
+      if (!hardenManagedPath(temporaryDb, false, 0o600)) {
+        removeTemporaryDb();
+        return;
+      }
+      const db = new NodeSqlite.DatabaseSync(temporaryDb);
       try {
         for (const table of OPENCODE2_SESSION_TABLES) {
           try {
@@ -273,12 +337,27 @@ export function seedOpenCode2ManagedDataHome(
       } finally {
         db.close();
       }
+      if (!hardenManagedPath(temporaryDb, false, 0o600)) {
+        removeTemporaryDb();
+        return;
+      }
+      if (managedFileState(managedDb) === "missing") {
+        try {
+          // A hard link publishes the complete, pruned database without
+          // replacing a database another startup created first.
+          NodeFS.linkSync(temporaryDb, managedDb);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+      }
+      removeTemporaryDb();
       return;
     }
 
     // Subsequent spawns: refresh credential rows from the host DB so new API
     // keys / oauth tokens land without wiping managed sessions. Empty host
     // rows clear managed credentials so host logout revokes them.
+    if (!hardenManagedPath(managedDb, false, 0o600)) return;
     const host = new NodeSqlite.DatabaseSync(hostDb, { readOnly: true });
     const managed = new NodeSqlite.DatabaseSync(managedDb);
     try {
@@ -312,6 +391,7 @@ export function seedOpenCode2ManagedDataHome(
       managed.close();
     }
   } catch {
+    removeTemporaryDb();
     // If seed fails, leave auth.json bridge only; free models still work.
     if (!NodeFS.existsSync(managedDb)) return;
   }
@@ -320,14 +400,15 @@ export function seedOpenCode2ManagedDataHome(
 export function applyOpenCode2ProviderEnvironment(
   settings: Pick<OpenCode2Settings, "backgroundSubagents" | "serverUrl">,
   environment: NodeJS.ProcessEnv,
+  instanceId?: string,
 ): NodeJS.ProcessEnv {
   if (settings.serverUrl.trim().length > 0) {
     return environment;
   }
 
   const hostDataHome = openCode2HostDataHome(environment);
-  const preferredStateRoot = openCode2ManagedStateRoot(environment);
-  migrateLegacyManagedStateRoot(preferredStateRoot, environment);
+  const preferredStateRoot = openCode2ManagedStateRoot(environment, instanceId);
+  migrateLegacyManagedStateRoot(preferredStateRoot, environment, instanceId);
   const preferredHomes = prepareManagedStateRoot(preferredStateRoot);
   const stateRoot =
     preferredHomes === undefined

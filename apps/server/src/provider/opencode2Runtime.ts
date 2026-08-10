@@ -117,6 +117,7 @@ export const OpenCode2RuntimeErrorCategory = Schema.Literals([
   "port-allocation-failed",
   "quarantined-binary",
   "replay-boundary",
+  "route-not-found",
   "sdk-request-failed",
   "server-spawn-failed",
   "session-remove-failed",
@@ -149,7 +150,11 @@ function openCode2SdkErrorCategoryFromText(
   cause: unknown,
 ): Extract<
   OpenCode2RuntimeErrorCategory,
-  "authentication-failed" | "model-unavailable" | "network-failed" | "sdk-request-failed"
+  | "authentication-failed"
+  | "model-unavailable"
+  | "network-failed"
+  | "route-not-found"
+  | "sdk-request-failed"
 > {
   const detail = openCodeRuntimeErrorDetail(cause).toLowerCase();
   if (detail.startsWith("model unavailable:")) return "model-unavailable";
@@ -172,6 +177,7 @@ function openCode2SdkErrorCategoryFromText(
   ) {
     return "network-failed";
   }
+  if (detail.includes("404") || detail.includes("not found")) return "route-not-found";
   return "sdk-request-failed";
 }
 

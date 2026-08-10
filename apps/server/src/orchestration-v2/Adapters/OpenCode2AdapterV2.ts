@@ -3411,34 +3411,32 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           patch: {
             readonly exit?: number;
             readonly status: ShellInfoV2["status"];
-            readonly output?: {
-              readonly output: string;
-              readonly cursor: number;
-              readonly truncated: boolean;
-            };
+            readonly output?:
+              | string
+              | {
+                  readonly output: string;
+                  readonly cursor: number;
+                  readonly truncated: boolean;
+                };
           },
         ) {
           const projection = shellProjections.get(shellId);
           if (projection === undefined) return;
           projection.status = patch.status;
-          if (
-            projection.turn.providerTurn.status !== "running" &&
-            projection.turn.providerTurn.status !== "completed"
-          ) {
-            return;
-          }
           const output =
-            patch.status === "killed" && patch.output === undefined
-              ? projection.part.output
-              : yield* readShellOutput(shellId, projection.location, patch.output).pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.logWarning("Failed to read OpenCode 2 shell output.", {
-                      errorTag: causeErrorTag(cause),
-                      provider: OPENCODE2_PROVIDER,
-                      shellId,
-                    }).pipe(Effect.as(projection.part.output)),
-                  ),
-                );
+            typeof patch.output === "string"
+              ? patch.output
+              : patch.status === "killed" && patch.output === undefined
+                ? projection.part.output
+                : yield* readShellOutput(shellId, projection.location, patch.output).pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("Failed to read OpenCode 2 shell output.", {
+                        errorTag: causeErrorTag(cause),
+                        provider: OPENCODE2_PROVIDER,
+                        shellId,
+                      }).pipe(Effect.as(projection.part.output)),
+                    ),
+                  );
           const completedAt = yield* DateTime.now;
           projection.part.status =
             patch.status === "exited" && patch.exit === 0 ? "completed" : "error";
@@ -3500,13 +3498,23 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           );
         });
 
+        const hasPendingRuntimeRequestForTurn = (turn: ActiveOpenCode2Turn): boolean =>
+          Array.from(pendingRequests.values()).some(
+            (pending) => pending.turn === turn || pending.state.parentSubagent?.parentTurn === turn,
+          );
+
         const failActiveTurns = Effect.fnUntraced(function* (
           detail: string,
           failureClass: "transport_error" | "provider_error",
+          preservePendingRequests = false,
         ) {
           yield* updateProviderSession("error", detail);
           for (const state of threads.values()) {
-            if (state.activeTurn !== null) {
+            if (
+              state.activeTurn !== null &&
+              (preservePendingRequests === false ||
+                !hasPendingRuntimeRequestForTurn(state.activeTurn))
+            ) {
               yield* finalizeTurn(state, state.activeTurn, "failed", {
                 failure: makeProviderFailure({ message: detail, class: failureClass }),
                 threadDisposition: "broken",
@@ -3518,9 +3526,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const allActiveTurnsAwaitRuntimeRequest = (): boolean =>
           Array.from(threads.values()).every((threadState) => {
             if (threadState.activeTurn === null) return true;
-            return Array.from(pendingRequests.values()).some(
-              (pending) => pending.turn === threadState.activeTurn,
-            );
+            return hasPendingRuntimeRequestForTurn(threadState.activeTurn);
           });
 
         const offerPostSettleWake = Effect.fnUntraced(function* (
@@ -4717,6 +4723,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   yield* failActiveTurns(
                     "OpenCode 2 event stream stalled and did not recover.",
                     "transport_error",
+                    true,
                   );
                   streamController.abort();
                   return;
@@ -4842,6 +4849,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 yield* failActiveTurns(
                   "OpenCode 2 event stream ended repeatedly while a turn was active.",
                   "transport_error",
+                  true,
                 );
                 consecutiveCleanEofResubscribes = 0;
                 cleanEofWindowStartedAtMs = null;
@@ -5258,8 +5266,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               Effect.map((response) => ({ available: true as const, response })),
               Effect.catch((error: OpenCode2RuntimeError) => {
                 // Beta lildax has no /mcp routes; do not block session open.
-                const detail = openCodeRuntimeErrorDetail(error.cause).toLowerCase();
-                if (detail.includes("404") || detail.includes("not found")) {
+                if (error.category === "route-not-found") {
                   return Effect.succeed({ available: false as const, response: null });
                 }
                 return Effect.fail(error);
@@ -6055,6 +6062,7 @@ export const OpenCode2AdapterV2Driver: ProviderAdapterDriver<
           applyOpenCode2ProviderEnvironment(
             input.config,
             mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+            input.instanceId,
           ),
         catch: (cause) =>
           new ProviderAdapterDriverCreateError({

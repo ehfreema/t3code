@@ -299,6 +299,7 @@ export const layerWithOptions = (
       );
       interface PreparedMcpCredential {
         readonly mcpCredentialId: string | undefined;
+        readonly issued: boolean;
       }
       /**
        * Reservations protect a credential between prepareMcpSession handing it
@@ -355,7 +356,7 @@ export const layerWithOptions = (
         options.configureMcp === false
           ? Effect.sync((): PreparedMcpCredential => {
               McpProviderSession.clearMcpProviderSession(threadId);
-              return { mcpCredentialId: undefined };
+              return { mcpCredentialId: undefined, issued: false };
             })
           : mcpPrepareLock.withLock(
               threadId,
@@ -412,7 +413,7 @@ export const layerWithOptions = (
                     ) {
                       // Hand the reservation to the caller; it owns the drop.
                       reserved = undefined;
-                      return { mcpCredentialId: existing.providerSessionId };
+                      return { mcpCredentialId: existing.providerSessionId, issued: false };
                     }
                     yield* abandon;
                   }
@@ -425,7 +426,7 @@ export const layerWithOptions = (
                   reserveMcpCredential(threadId, credential.config.providerSessionId);
                   // Hand the reservation to the caller; it owns the drop.
                   reserved = undefined;
-                  return { mcpCredentialId: credential.config.providerSessionId };
+                  return { mcpCredentialId: credential.config.providerSessionId, issued: true };
                 }).pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? abandon : Effect.void)));
               }),
             );
@@ -653,59 +654,61 @@ export const layerWithOptions = (
           }
         });
 
-      const releaseEntry = (input: {
-        readonly providerSessionId: ProviderSessionId;
-        readonly reason: ProviderSessionReleaseReason;
-        readonly detail?: string;
-        readonly cancelIdleFiber?: boolean;
-        readonly onlyIfIdleGeneration?: number;
-      }) =>
+      const releaseEntryInternal = (
+        input: {
+          readonly providerSessionId: ProviderSessionId;
+          readonly reason: ProviderSessionReleaseReason;
+          readonly detail?: string;
+          readonly cancelIdleFiber?: boolean;
+          readonly onlyIfIdleGeneration?: number;
+        },
+        lockHeld: boolean,
+      ) =>
         Effect.acquireUseRelease(
           Effect.sync(() => ({ entry: Option.none<LiveSessionEntry>() })),
-          (releaseState) =>
-            sessionLifecycle.withLock(
-              input.providerSessionId,
-              Effect.uninterruptible(
-                Effect.gen(function* () {
-                  const entry = yield* Ref.modify(sessions, (current) => {
-                    const key = sessionKey(input.providerSessionId);
-                    const existing = current.get(key);
-                    if (existing === undefined) {
-                      return [Option.none<LiveSessionEntry>(), current] as const;
-                    }
-                    if (
-                      input.onlyIfIdleGeneration !== undefined &&
-                      (existing.busyCount > 0 ||
-                        existing.idleGeneration !== input.onlyIfIdleGeneration)
-                    ) {
-                      return [Option.none<LiveSessionEntry>(), current] as const;
-                    }
-                    const updated = new Map(current);
-                    updated.delete(key);
-                    return [Option.some(existing), updated] as const;
-                  });
-                  releaseState.entry = entry;
-                  if (Option.isNone(entry)) return;
-                  if (input.reason === "server_shutdown") {
-                    yield* closeSubscribers(entry.value);
-                  } else {
-                    yield* failSubscribers(
-                      entry.value,
-                      input.detail ?? `Provider session released: ${input.reason}.`,
-                    );
+          (releaseState) => {
+            const release = Effect.uninterruptible(
+              Effect.gen(function* () {
+                const entry = yield* Ref.modify(sessions, (current) => {
+                  const key = sessionKey(input.providerSessionId);
+                  const existing = current.get(key);
+                  if (existing === undefined) {
+                    return [Option.none<LiveSessionEntry>(), current] as const;
                   }
-                  yield* writeReleasedSessionEvents({
-                    entry: entry.value,
-                    reason: input.reason,
-                    ...(input.detail === undefined ? {} : { detail: input.detail }),
-                  });
-                  yield* writeReleasedRuntimeRequestEvents({
-                    entry: entry.value,
-                    reason: input.reason,
-                  });
-                }),
-              ),
-            ),
+                  if (
+                    input.onlyIfIdleGeneration !== undefined &&
+                    (existing.busyCount > 0 ||
+                      existing.idleGeneration !== input.onlyIfIdleGeneration)
+                  ) {
+                    return [Option.none<LiveSessionEntry>(), current] as const;
+                  }
+                  const updated = new Map(current);
+                  updated.delete(key);
+                  return [Option.some(existing), updated] as const;
+                });
+                releaseState.entry = entry;
+                if (Option.isNone(entry)) return;
+                if (input.reason === "server_shutdown") {
+                  yield* closeSubscribers(entry.value);
+                } else {
+                  yield* failSubscribers(
+                    entry.value,
+                    input.detail ?? `Provider session released: ${input.reason}.`,
+                  );
+                }
+                yield* writeReleasedSessionEvents({
+                  entry: entry.value,
+                  reason: input.reason,
+                  ...(input.detail === undefined ? {} : { detail: input.detail }),
+                });
+                yield* writeReleasedRuntimeRequestEvents({
+                  entry: entry.value,
+                  reason: input.reason,
+                });
+              }),
+            );
+            return lockHeld ? release : sessionLifecycle.withLock(input.providerSessionId, release);
+          },
           ({ entry }) =>
             Option.match(entry, {
               onNone: () => Effect.void,
@@ -787,6 +790,22 @@ export const layerWithOptions = (
             ),
           ),
         );
+
+      const releaseEntry = (input: {
+        readonly providerSessionId: ProviderSessionId;
+        readonly reason: ProviderSessionReleaseReason;
+        readonly detail?: string;
+        readonly cancelIdleFiber?: boolean;
+        readonly onlyIfIdleGeneration?: number;
+      }) => releaseEntryInternal(input, false);
+
+      const releaseEntryWhileLocked = (input: {
+        readonly providerSessionId: ProviderSessionId;
+        readonly reason: ProviderSessionReleaseReason;
+        readonly detail?: string;
+        readonly cancelIdleFiber?: boolean;
+        readonly onlyIfIdleGeneration?: number;
+      }) => releaseEntryInternal(input, true);
 
       // Annotated to break the releaseIfStillIdle <-> scheduleIdleReleaseInternal
       // inference cycle introduced by the pin re-arm below.
@@ -1070,7 +1089,7 @@ export const layerWithOptions = (
                   Effect.suspend(() => {
                     const credentialId = preparedForCleanup?.mcpCredentialId;
                     dropReservation();
-                    return credentialId === undefined
+                    return credentialId === undefined || preparedForCleanup?.issued !== true
                       ? Effect.void
                       : isMcpCredentialHeldElsewhere(
                           input.threadId,
@@ -1685,191 +1704,199 @@ export const layerWithOptions = (
           ),
         release: releaseEntry,
         detach: (input) =>
-          Effect.gen(function* () {
-            const key = sessionKey(input.providerSessionId);
-            const currentEntry = (yield* Ref.get(sessions)).get(key);
-            const shouldLoadProviderThreads =
-              currentEntry !== undefined &&
-              (currentEntry.supportsMultipleProviderThreads || input.deleteProviderThread === true);
-            const projection = shouldLoadProviderThreads
-              ? yield* Effect.option(projectionStore.getThreadProjection(input.threadId))
-              : Option.none();
-            let providerThreads: ReadonlyMap<
-              OrchestrationV2ProviderThread["id"],
-              OrchestrationV2ProviderThread
-            >;
-            if (input.providerThreads !== undefined) {
-              providerThreads = new Map(
-                input.providerThreads.map((thread) => [thread.id, thread] as const),
-              );
-            } else if (Option.isSome(projection)) {
-              providerThreads = new Map(
-                projection.value.providerThreads
-                  .filter((thread) => thread.providerSessionId === input.providerSessionId)
-                  .map((thread) => [thread.id, thread] as const),
-              );
-            } else {
-              providerThreads = new Map();
-            }
-            let deletionFailure: Exit.Exit<void, ProviderAdapterV2Error> | null = null;
-            if (
-              input.deleteProviderThread === true &&
-              currentEntry === undefined &&
-              input.providerInstanceId !== undefined &&
-              input.providerSession !== undefined
-            ) {
-              // Historical / retry detach: the live entry may already be gone
-              // and the adapter may be unregistered. Wrap registry.get so a
-              // missing adapter still reaches clearMcpSession below when
-              // revokeMcpCredential is set.
-              const adapterExit = yield* Effect.exit(registry.get(input.providerInstanceId));
-              if (Exit.isSuccess(adapterExit)) {
-                const deleteDetachedThread = adapterExit.value.deleteDetachedThread;
-                if (deleteDetachedThread !== undefined) {
-                  const providerSession = input.providerSession;
-                  const exits = yield* Effect.scoped(
-                    Effect.forEach(providerThreads.values(), (providerThread) =>
-                      Effect.exit(
-                        deleteDetachedThread({
-                          providerSession,
-                          providerThread,
-                        }),
-                      ),
-                    ),
+          sessionLifecycle
+            .withLock(
+              input.providerSessionId,
+              Effect.gen(function* () {
+                const key = sessionKey(input.providerSessionId);
+                const currentEntry = (yield* Ref.get(sessions)).get(key);
+                const shouldLoadProviderThreads =
+                  currentEntry !== undefined &&
+                  (currentEntry.supportsMultipleProviderThreads ||
+                    input.deleteProviderThread === true);
+                const projection = shouldLoadProviderThreads
+                  ? yield* Effect.option(projectionStore.getThreadProjection(input.threadId))
+                  : Option.none();
+                let providerThreads: ReadonlyMap<
+                  OrchestrationV2ProviderThread["id"],
+                  OrchestrationV2ProviderThread
+                >;
+                if (input.providerThreads !== undefined) {
+                  providerThreads = new Map(
+                    input.providerThreads.map((thread) => [thread.id, thread] as const),
                   );
-                  deletionFailure = exits.find(Exit.isFailure) ?? null;
+                } else if (Option.isSome(projection)) {
+                  providerThreads = new Map(
+                    projection.value.providerThreads
+                      .filter((thread) => thread.providerSessionId === input.providerSessionId)
+                      .map((thread) => [thread.id, thread] as const),
+                  );
+                } else {
+                  providerThreads = new Map();
                 }
-              } else {
-                yield* Effect.logWarning(
-                  "orchestration-v2.driver-session.detach-adapter-unavailable",
-                  {
-                    providerSessionId: input.providerSessionId,
-                    threadId: input.threadId,
-                    providerInstanceId: input.providerInstanceId,
-                    cause: adapterExit.cause,
-                  },
-                );
-              }
-            }
-            if (
-              currentEntry !== undefined &&
-              Option.isSome(projection) &&
-              (currentEntry.supportsMultipleProviderThreads || input.deleteProviderThread === true)
-            ) {
-              const activeTurns = projection.value.providerTurns.filter(
-                (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
-              );
-              yield* Effect.forEach(
-                activeTurns,
-                (turn) =>
-                  currentEntry.exposedRuntime
-                    .interruptTurn({
-                      providerThread: providerThreads.get(turn.providerThreadId)!,
-                      providerTurnId: turn.id,
-                    })
-                    .pipe(
-                      Effect.catchCause((cause) =>
-                        Effect.logWarning(
-                          "orchestration-v2.driver-session.detach-interrupt-failed",
-                          {
-                            providerSessionId: input.providerSessionId,
-                            threadId: input.threadId,
-                            providerTurnId: turn.id,
-                            cause,
-                          },
+                let deletionFailure: Exit.Exit<void, ProviderAdapterV2Error> | null = null;
+                if (
+                  input.deleteProviderThread === true &&
+                  currentEntry === undefined &&
+                  input.providerInstanceId !== undefined &&
+                  input.providerSession !== undefined
+                ) {
+                  // Historical / retry detach: the live entry may already be gone
+                  // and the adapter may be unregistered. Wrap registry.get so a
+                  // missing adapter still reaches clearMcpSession below when
+                  // revokeMcpCredential is set.
+                  const adapterExit = yield* Effect.exit(registry.get(input.providerInstanceId));
+                  if (Exit.isSuccess(adapterExit)) {
+                    const deleteDetachedThread = adapterExit.value.deleteDetachedThread;
+                    if (deleteDetachedThread !== undefined) {
+                      const providerSession = input.providerSession;
+                      const exits = yield* Effect.scoped(
+                        Effect.forEach(providerThreads.values(), (providerThread) =>
+                          Effect.exit(
+                            deleteDetachedThread({
+                              providerSession,
+                              providerThread,
+                            }),
+                          ),
                         ),
-                      ),
-                    ),
-                { concurrency: 1, discard: true },
-              );
-            }
-            if (
-              input.deleteProviderThread === true &&
-              currentEntry?.exposedRuntime.deleteThread !== undefined
-            ) {
-              const exits = yield* Effect.forEach(
-                providerThreads.values(),
-                (providerThread) =>
-                  Effect.exit(currentEntry.exposedRuntime.deleteThread!(providerThread)),
-                { concurrency: 1 },
-              );
-              deletionFailure = exits.find(Exit.isFailure) ?? deletionFailure;
-            }
-            const detached = yield* Ref.modify(sessions, (current) => {
-              const entry = current.get(key);
-              if (entry === undefined || !entry.attachedThreadIds.has(input.threadId)) {
-                return [Option.none<LiveSessionEntry>(), current] as const;
-              }
-              const attachedThreadIds = new Set(entry.attachedThreadIds);
-              attachedThreadIds.delete(input.threadId);
-              const loadedProviderThreadKeyByThread = new Map(
-                entry.loadedProviderThreadKeyByThread,
-              );
-              loadedProviderThreadKeyByThread.delete(input.threadId);
-              // For a plain (workspace-change) detach, the credential id stays
-              // recorded: the thread may re-attach and reuse it, and
-              // releaseEntry revokes it when the provider process finally goes
-              // away. A terminal detach (archive/delete) prunes the record so
-              // nothing vetoes the revocation below.
-              const mcpCredentialIdByThread =
-                input.revokeMcpCredential === true
-                  ? (() => {
-                      const pruned = new Map(entry.mcpCredentialIdByThread);
-                      pruned.delete(input.threadId);
-                      return pruned;
-                    })()
-                  : entry.mcpCredentialIdByThread;
-              const updatedEntry = {
-                ...entry,
-                attachedThreadIds,
-                loadedProviderThreadKeyByThread,
-                mcpCredentialIdByThread,
-              };
-              const updated = new Map(current);
-              updated.set(key, updatedEntry);
-              return [Option.some(updatedEntry), updated] as const;
-            });
-            // Plain detaches deliberately do not revoke: a detached thread's
-            // provider process may still be alive (shared multi-thread codex
-            // session across a workspace handoff) and holds its MCP client's
-            // credential for the thread it will re-attach with. Credentials
-            // are revoked when the session entry is released (process gone)
-            // or rotated on the next attach if they stopped resolving.
-            // Terminal detaches (thread archived or deleted) revoke the
-            // thread's credentials immediately, even on a retry where the
-            // entry is already gone: there is no legitimate future re-attach,
-            // and the token must not outlive the thread.
-            if (input.revokeMcpCredential === true) {
-              yield* clearMcpSession(input.threadId);
-            }
-            if (Option.isSome(detached)) {
-              if (
-                detached.value.attachedThreadIds.size === 0 &&
-                !detached.value.supportsMultipleProviderThreads
-              ) {
-                yield* releaseEntry({
-                  providerSessionId: input.providerSessionId,
-                  reason: "manual_shutdown",
-                  ...(input.detail === undefined ? {} : { detail: input.detail }),
+                      );
+                      deletionFailure = exits.find(Exit.isFailure) ?? null;
+                    }
+                  } else {
+                    yield* Effect.logWarning(
+                      "orchestration-v2.driver-session.detach-adapter-unavailable",
+                      {
+                        providerSessionId: input.providerSessionId,
+                        threadId: input.threadId,
+                        providerInstanceId: input.providerInstanceId,
+                        cause: adapterExit.cause,
+                      },
+                    );
+                  }
+                }
+                if (
+                  currentEntry !== undefined &&
+                  Option.isSome(projection) &&
+                  (currentEntry.supportsMultipleProviderThreads ||
+                    input.deleteProviderThread === true)
+                ) {
+                  const activeTurns = projection.value.providerTurns.filter(
+                    (turn) =>
+                      turn.status === "running" && providerThreads.has(turn.providerThreadId),
+                  );
+                  yield* Effect.forEach(
+                    activeTurns,
+                    (turn) =>
+                      currentEntry.exposedRuntime
+                        .interruptTurn({
+                          providerThread: providerThreads.get(turn.providerThreadId)!,
+                          providerTurnId: turn.id,
+                        })
+                        .pipe(
+                          Effect.catchCause((cause) =>
+                            Effect.logWarning(
+                              "orchestration-v2.driver-session.detach-interrupt-failed",
+                              {
+                                providerSessionId: input.providerSessionId,
+                                threadId: input.threadId,
+                                providerTurnId: turn.id,
+                                cause,
+                              },
+                            ),
+                          ),
+                        ),
+                    { concurrency: 1, discard: true },
+                  );
+                }
+                if (
+                  input.deleteProviderThread === true &&
+                  currentEntry?.exposedRuntime.deleteThread !== undefined
+                ) {
+                  const exits = yield* Effect.forEach(
+                    providerThreads.values(),
+                    (providerThread) =>
+                      Effect.exit(currentEntry.exposedRuntime.deleteThread!(providerThread)),
+                    { concurrency: 1 },
+                  );
+                  deletionFailure = exits.find(Exit.isFailure) ?? deletionFailure;
+                }
+                const detached = yield* Ref.modify(sessions, (current) => {
+                  const entry = current.get(key);
+                  if (entry === undefined || !entry.attachedThreadIds.has(input.threadId)) {
+                    return [Option.none<LiveSessionEntry>(), current] as const;
+                  }
+                  const attachedThreadIds = new Set(entry.attachedThreadIds);
+                  attachedThreadIds.delete(input.threadId);
+                  const loadedProviderThreadKeyByThread = new Map(
+                    entry.loadedProviderThreadKeyByThread,
+                  );
+                  loadedProviderThreadKeyByThread.delete(input.threadId);
+                  // For a plain (workspace-change) detach, the credential id stays
+                  // recorded: the thread may re-attach and reuse it, and
+                  // releaseEntry revokes it when the provider process finally goes
+                  // away. A terminal detach (archive/delete) prunes the record so
+                  // nothing vetoes the revocation below.
+                  const mcpCredentialIdByThread =
+                    input.revokeMcpCredential === true
+                      ? (() => {
+                          const pruned = new Map(entry.mcpCredentialIdByThread);
+                          pruned.delete(input.threadId);
+                          return pruned;
+                        })()
+                      : entry.mcpCredentialIdByThread;
+                  const updatedEntry = {
+                    ...entry,
+                    attachedThreadIds,
+                    loadedProviderThreadKeyByThread,
+                    mcpCredentialIdByThread,
+                  };
+                  const updated = new Map(current);
+                  updated.set(key, updatedEntry);
+                  return [Option.some(updatedEntry), updated] as const;
                 });
-              } else {
-                yield* scheduleIdleRelease(input.providerSessionId);
-              }
-            }
-            if (deletionFailure !== null && Exit.isFailure(deletionFailure)) {
-              return yield* Effect.failCause(deletionFailure.cause);
-            }
-          }).pipe(
-            Effect.catchCause((cause) =>
-              Effect.fail(
-                new ProviderSessionReleaseError({
-                  providerSessionId: input.providerSessionId,
-                  reason: "manual_shutdown",
-                  cause,
-                }),
+                // Plain detaches deliberately do not revoke: a detached thread's
+                // provider process may still be alive (shared multi-thread codex
+                // session across a workspace handoff) and holds its MCP client's
+                // credential for the thread it will re-attach with. Credentials
+                // are revoked when the session entry is released (process gone)
+                // or rotated on the next attach if they stopped resolving.
+                // Terminal detaches (thread archived or deleted) revoke the
+                // thread's credentials immediately, even on a retry where the
+                // entry is already gone: there is no legitimate future re-attach,
+                // and the token must not outlive the thread.
+                if (input.revokeMcpCredential === true) {
+                  yield* clearMcpSession(input.threadId);
+                }
+                if (Option.isSome(detached)) {
+                  if (
+                    detached.value.attachedThreadIds.size === 0 &&
+                    !detached.value.supportsMultipleProviderThreads
+                  ) {
+                    yield* releaseEntryWhileLocked({
+                      providerSessionId: input.providerSessionId,
+                      reason: "manual_shutdown",
+                      ...(input.detail === undefined ? {} : { detail: input.detail }),
+                    });
+                  } else {
+                    yield* scheduleIdleRelease(input.providerSessionId);
+                  }
+                }
+                if (deletionFailure !== null && Exit.isFailure(deletionFailure)) {
+                  return yield* Effect.failCause(deletionFailure.cause);
+                }
+              }),
+            )
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.fail(
+                  new ProviderSessionReleaseError({
+                    providerSessionId: input.providerSessionId,
+                    reason: "manual_shutdown",
+                    cause,
+                  }),
+                ),
               ),
             ),
-          ),
       } satisfies ProviderSessionManagerV2Shape);
     }),
   );

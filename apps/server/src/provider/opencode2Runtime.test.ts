@@ -225,13 +225,13 @@ describe("OpenCode2Runtime errors", () => {
     }),
   );
 
-  it.effect("does not classify an SDK 404 as a missing executable", () =>
+  it.effect("classifies an SDK 404 as a missing route", () =>
     Effect.gen(function* () {
       const error = yield* runOpenCode2Sdk("health.get", async () => {
         throw new Error("NotFoundError: endpoint returned 404");
       }).pipe(Effect.flip);
 
-      assert.strictEqual(error.category, "sdk-request-failed");
+      assert.strictEqual(error.category, "route-not-found");
     }),
   );
 });

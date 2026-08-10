@@ -82,11 +82,13 @@ const FailingReleaseEventSinkLayer = Layer.effect(
 const makeFailingAttachEventSinkLayer = (input: {
   readonly threadId: ThreadId;
   readonly capturedConfig: Ref.Ref<McpProviderSession.McpProviderSessionConfig | undefined>;
+  readonly failAfter?: number;
 }) =>
   Layer.effect(
     EventSinkV2,
     Effect.gen(function* () {
       const delegate = yield* EventSinkV2;
+      let attachedWrites = 0;
       return EventSinkV2.of({
         ...delegate,
         write: (writeInput) =>
@@ -94,12 +96,23 @@ const makeFailingAttachEventSinkLayer = (input: {
             (event) =>
               event.type === "provider-session.attached" && event.threadId === input.threadId,
           )
-            ? Ref.set(
-                input.capturedConfig,
-                McpProviderSession.readMcpProviderSession(input.threadId),
-              ).pipe(
-                Effect.andThen(
-                  Effect.fail(new EventSinkWriteError({ eventCount: writeInput.events.length })),
+            ? Effect.sync(() => {
+                attachedWrites += 1;
+                return attachedWrites >= (input.failAfter ?? 1);
+              }).pipe(
+                Effect.flatMap((shouldFail) =>
+                  shouldFail
+                    ? Ref.set(
+                        input.capturedConfig,
+                        McpProviderSession.readMcpProviderSession(input.threadId),
+                      ).pipe(
+                        Effect.andThen(
+                          Effect.fail(
+                            new EventSinkWriteError({ eventCount: writeInput.events.length }),
+                          ),
+                        ),
+                      )
+                    : delegate.write(writeInput),
                 ),
               )
             : delegate.write(writeInput),
@@ -417,6 +430,7 @@ function makeTestLayer(input: {
   readonly failAttachedThread?: {
     readonly threadId: ThreadId;
     readonly capturedConfig: Ref.Ref<McpProviderSession.McpProviderSessionConfig | undefined>;
+    readonly failAfter?: number;
   };
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
@@ -1011,6 +1025,80 @@ it.effect("ProviderSessionManagerV2 revokes MCP credentials when a shared attach
       ),
     );
   }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 preserves a reused credential when re-attach persistence fails",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      const failedAttachConfig = yield* Ref.make<
+        McpProviderSession.McpProviderSessionConfig | undefined
+      >(undefined);
+      const threadId = ThreadId.make("thread-provider-session-manager-reused-attach-failure");
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const manager = yield* ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const original = (yield* Ref.get(mcpConfigs)).at(-1);
+        const originalToken = original?.authorizationHeader.replace(/^Bearer\s+/, "");
+        assert.isDefined(originalToken);
+
+        yield* manager.detach({ providerSessionId, threadId });
+        const attachExit = yield* manager
+          .open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(attachExit));
+
+        const failed = yield* Ref.get(failedAttachConfig);
+        assert.isDefined(failed);
+        assert.equal(failed?.providerSessionId, original?.providerSessionId);
+        assert.equal((yield* registry.resolve(originalToken!))?.threadId, threadId);
+        assert.equal(
+          McpProviderSession.readMcpProviderSession(threadId)?.providerSessionId,
+          original?.providerSessionId,
+        );
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            mcpConfigs,
+            failAttachedThread: {
+              threadId,
+              capturedConfig: failedAttachConfig,
+              failAfter: 2,
+            },
+          }),
+        ),
+      );
+    }),
 );
 
 it.effect("ProviderSessionManagerV2 duplicate detach preserves replacement MCP credentials", () =>

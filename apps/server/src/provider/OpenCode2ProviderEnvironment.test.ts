@@ -25,6 +25,14 @@ describe("applyOpenCode2ProviderEnvironment", () => {
     );
   });
 
+  it("isolates managed state between provider instances for one user", () => {
+    const environment = { TMPDIR: "/tmp/opencode2-root", HOME: "/home/alice" };
+    const first = openCode2ManagedStateRoot(environment, "opencode2");
+    const second = openCode2ManagedStateRoot(environment, "opencode2-work");
+    expect(first).not.toBe(second);
+    expect(first).toBe(openCode2ManagedStateRoot(environment, "opencode2"));
+  });
+
   it("does not write through a planted managed-state symlink", () => {
     if (isWindows) return;
     const tmp = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-state-link-"));
@@ -219,6 +227,9 @@ describe("seedOpenCode2ManagedDataHome", () => {
     } finally {
       managedDb.close();
     }
+    expect(
+      NodeFS.readdirSync(NodePath.join(managed, "opencode")).some((name) => name.endsWith(".tmp")),
+    ).toBe(false);
   });
 
   it("refreshes credentials transactionally and revokes host logouts", () => {
