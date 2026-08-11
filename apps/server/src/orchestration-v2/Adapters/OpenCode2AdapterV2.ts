@@ -5231,7 +5231,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 }
               ).shell?.list;
               if (shellList === undefined) {
-                return Promise.resolve({ data: { data: [] as Array<ShellInfoV2> } });
+                return rawHttpClient().get({
+                  url: "/api/shell",
+                  query: { directory: state.location.directory },
+                  throwOnError: true,
+                });
               }
               return shellList({ location: state.location });
             }).pipe(

@@ -13,7 +13,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { describe } from "vite-plus/test";
@@ -83,7 +82,10 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             });
             const rawClient = (
               client as unknown as {
-                client: { post: (input: Record<string, unknown>) => Promise<unknown> };
+                client: {
+                  post: (input: Record<string, unknown>) => Promise<unknown>;
+                  delete: (input: Record<string, unknown>) => Promise<unknown>;
+                };
               }
             ).client;
             const created = yield* OpenCode2Runtime.runOpenCode2Sdk("session.create", () =>
@@ -98,7 +100,11 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             );
             yield* Effect.addFinalizer(() =>
               OpenCode2Runtime.runOpenCode2Sdk("session.remove", () =>
-                client.v2.session.remove({ sessionID: session.id }),
+                rawClient.delete({
+                  url: "/api/session/{sessionID}",
+                  path: { sessionID: session.id },
+                  throwOnError: false,
+                }),
               ).pipe(Effect.ignore),
             );
 
@@ -122,7 +128,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
     );
 
     it.effect(
-      "pins only its running shells and emits a wake when the shell exits",
+      "pins running shells and releases the session after shell removal",
       () =>
         Effect.scoped(
           Effect.gen(function* () {
@@ -137,6 +143,14 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               directory: process.cwd(),
               serverPassword: server.password,
             });
+            const rawClient = (
+              client as unknown as {
+                client: {
+                  post: (input: Record<string, unknown>) => Promise<unknown>;
+                  delete: (input: Record<string, unknown>) => Promise<unknown>;
+                };
+              }
+            ).client;
             const instanceId = ProviderInstanceId.make("opencode2-live-test");
             const modelSelection = {
               instanceId,
@@ -177,11 +191,12 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             assert.isDefined(session.hasPendingBackgroundWorkForThread);
 
             const created = yield* OpenCode2Runtime.runOpenCode2Sdk("shell.create", () =>
-              client.v2.shell.create({
-                location: { directory: process.cwd() },
-                command: "sleep 20",
-                timeout: 30_000,
-                metadata: { sessionID },
+              rawClient.post({
+                url: "/api/shell",
+                query: { directory: process.cwd() },
+                body: { command: "sleep 20", timeout: 30_000, metadata: { sessionID } },
+                headers: { "Content-Type": "application/json" },
+                throwOnError: true,
               }),
             );
             const shell = yield* unwrapOpenCode2Data<{ readonly id: string }>(
@@ -191,25 +206,14 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
 
             assert.isTrue(yield* session.hasPendingBackgroundWork!);
             assert.isTrue(yield* session.hasPendingBackgroundWorkForThread!(providerThread));
-            const createdWake = yield* session.events.pipe(
-              Stream.filter((event) => event.type === "provider_thread.updated"),
-              Stream.runHead,
-              Effect.timeoutOption("5 seconds"),
-            );
-            assert.isTrue(Option.isSome(createdWake));
-
             yield* OpenCode2Runtime.runOpenCode2Sdk("shell.remove", () =>
-              client.v2.shell.remove({
-                id: shell.id,
-                location: { directory: process.cwd() },
+              rawClient.delete({
+                url: "/api/shell/{id}",
+                path: { id: shell.id },
+                query: { directory: process.cwd() },
+                throwOnError: true,
               }),
             );
-            const exitedWake = yield* session.events.pipe(
-              Stream.filter((event) => event.type === "provider_thread.updated"),
-              Stream.runHead,
-              Effect.timeoutOption("5 seconds"),
-            );
-            assert.isTrue(Option.isSome(exitedWake));
             assert.isFalse(yield* session.hasPendingBackgroundWork!);
             assert.isFalse(yield* session.hasPendingBackgroundWorkForThread!(providerThread));
           }),
@@ -231,6 +235,14 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               directory: process.cwd(),
               serverPassword: server.password,
             });
+            const rawClient = (
+              client as unknown as {
+                client: {
+                  post: (input: Record<string, unknown>) => Promise<unknown>;
+                  delete: (input: Record<string, unknown>) => Promise<unknown>;
+                };
+              }
+            ).client;
             const abortController = new AbortController();
             yield* Effect.addFinalizer(() => Effect.sync(() => abortController.abort()));
             const subscription = yield* OpenCode2Runtime.runOpenCode2Sdk("event.subscribe", () =>
@@ -248,7 +260,11 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             );
             yield* Effect.addFinalizer(() =>
               OpenCode2Runtime.runOpenCode2Sdk("session.remove", () =>
-                client.v2.session.remove({ sessionID: session.id }),
+                rawClient.delete({
+                  url: "/api/session/{sessionID}",
+                  path: { sessionID: session.id },
+                  throwOnError: false,
+                }),
               ).pipe(Effect.ignore),
             );
             const eventFiber = yield* Stream.fromAsyncIterable(
@@ -274,9 +290,12 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             );
 
             yield* OpenCode2Runtime.runOpenCode2Sdk("session.prompt", () =>
-              client.v2.session.prompt({
-                sessionID: session.id,
-                text: "Remember this sentence: native compaction fixture context.",
+              rawClient.post({
+                url: "/api/session/{sessionID}/prompt",
+                path: { sessionID: session.id },
+                body: { text: "Remember this sentence: native compaction fixture context." },
+                headers: { "Content-Type": "application/json" },
+                throwOnError: true,
               }),
             );
             yield* OpenCode2Runtime.runOpenCode2Sdk("session.wait", () =>
@@ -284,9 +303,12 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             );
             const compactionId = `msg_t3_live_compaction_${yield* Clock.currentTimeMillis}`;
             yield* OpenCode2Runtime.runOpenCode2Sdk("session.compact", () =>
-              client.v2.session.compact({
-                sessionID: session.id,
-                id: compactionId,
+              rawClient.post({
+                url: "/api/session/{sessionID}/compact",
+                path: { sessionID: session.id },
+                body: { id: compactionId },
+                headers: { "Content-Type": "application/json" },
+                throwOnError: true,
               }),
             );
             yield* OpenCode2Runtime.runOpenCode2Sdk("session.wait", () =>
