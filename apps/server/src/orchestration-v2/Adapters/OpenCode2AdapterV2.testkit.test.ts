@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
+import { createOpencodeClient } from "@opencode-ai/sdk-next/v2";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -414,8 +415,14 @@ describe("OpenCode2AdapterV2 replay testkit", () => {
     }),
   );
 
-  it.effect("uses the raw shell list route when the SDK omits shell.list", () =>
+  it.effect("uses the raw shell list route when the pinned SDK omits shell.list", () =>
     Effect.gen(function* () {
+      const actualSdkClient = createOpencodeClient({
+        baseUrl: "http://127.0.0.1:1",
+        directory: "/workspace",
+      });
+      assert.isUndefined((actualSdkClient.v2 as unknown as { readonly shell?: unknown }).shell);
+
       const controller = new OpenCode2ReplayController(transcript([]));
       const client = makeReplayClient(controller) as unknown as {
         client: {
