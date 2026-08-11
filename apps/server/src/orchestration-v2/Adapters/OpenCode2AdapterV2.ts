@@ -2050,6 +2050,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           client as unknown as {
             v2?: {
               shell?: {
+                list?: (input: Record<string, unknown>) => Promise<unknown>;
                 output?: (input: Record<string, unknown>) => Promise<unknown>;
                 remove?: (input: Record<string, unknown>) => Promise<unknown>;
               };
@@ -2085,6 +2086,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             url: "/api/shell/{id}",
             path: { id: input.id },
             query: { directory: input.location.directory },
+            throwOnError: false,
+          });
+        };
+
+        const listShellHttp = (location: SessionInfoV2["location"]) => {
+          if (v2Shell?.shell?.list !== undefined) {
+            return v2Shell.shell.list({ location });
+          }
+          return rawHttpClient().get({
+            url: "/api/shell",
+            query: { directory: location.directory },
             throwOnError: false,
           });
         };
@@ -3771,20 +3783,51 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           yield* emitToolPart(projection.state, projection.turn, projection.part);
         });
 
-        const removeRunningShellsForTurn = Effect.fnUntraced(function* (turn: ActiveOpenCode2Turn) {
+        const removeRunningShellsForTurn = Effect.fnUntraced(function* (
+          state: OpenCode2ThreadState,
+          turn: ActiveOpenCode2Turn,
+        ) {
           const running = Array.from(shellProjections.values()).filter(
             (projection) => projection.turn === turn && projection.status === "running",
           );
-          let allRemoved = true;
+          const runningCommandParts = Array.from(turn.parts.values()).filter(
+            (part): part is OpenCode2ToolPart =>
+              part.kind === "tool" &&
+              part.status === "running" &&
+              openCodeToolProjectionKind(part.name) === "command_execution",
+          );
+          const needsNativeRoster = runningCommandParts.length !== running.length;
+          const shells = needsNativeRoster
+            ? yield* sdkCall("shell.list", { location: state.location }, () =>
+                listShellHttp(state.location),
+              ).pipe(
+                Effect.flatMap((response) =>
+                  unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
+                ),
+              )
+            : [];
+          const targets = new Map<string, SessionInfoV2["location"]>();
           for (const projection of running) {
+            targets.set(projection.shellId, projection.location);
+          }
+          let allRemoved = true;
+          for (const shell of shells) {
+            if (shell.status !== "running") continue;
+            if (shell.metadata.sessionID === state.nativeSessionId) {
+              targets.set(shell.id, state.location);
+            } else if (shell.metadata.sessionID === undefined) {
+              allRemoved = false;
+            }
+          }
+          for (const [shellId, location] of targets) {
             const parameters = {
-              id: projection.shellId,
-              location: projection.location,
+              id: shellId,
+              location,
             };
             const removed = yield* sdkCall("shell.remove", parameters, () =>
               removeShellHttp({
-                id: projection.shellId,
-                location: projection.location,
+                id: shellId,
+                location,
               }),
             ).pipe(
               Effect.map(openCode2ShellRemovalSucceeded),
@@ -3792,7 +3835,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 Effect.logWarning("Failed to stop an interrupted OpenCode 2 shell.", {
                   errorTag: causeErrorTag(cause),
                   provider: OPENCODE2_PROVIDER,
-                  shellId: projection.shellId,
+                  shellId,
                 }).pipe(Effect.as(false)),
               ),
             );
@@ -4348,10 +4391,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               return;
             }
             case "shell.deleted": {
-              const sessionID = shellSessionIds.get(event.data.id);
-              if (sessionID === undefined) return;
               const projection = shellProjections.get(event.data.id);
-              if (projection !== undefined && projection.turn.finalized) {
+              const sessionID =
+                shellSessionIds.get(event.data.id) ?? projection?.state.nativeSessionId;
+              if (sessionID === undefined) return;
+              if (projection !== undefined) {
                 yield* completeShellProjection(event.data.id, { status: "killed" });
               }
               shellProjections.delete(event.data.id);
@@ -5677,19 +5721,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 unwrapOpenCode2Data<Array<SessionPendingInfo>>("session.pending.list", response),
               ),
             ),
-            shells: sdkCall("shell.list", { location: state.location }, () => {
-              const shellList = (
-                client.v2 as {
-                  shell?: {
-                    list: (input: { location: SessionInfoV2["location"] }) => Promise<unknown>;
-                  };
-                }
-              ).shell?.list;
-              if (shellList === undefined) {
-                return Promise.resolve({ data: { data: [] as Array<ShellInfoV2> } });
-              }
-              return shellList({ location: state.location });
-            }).pipe(
+            shells: sdkCall("shell.list", { location: state.location }, () =>
+              listShellHttp(state.location),
+            ).pipe(
               Effect.flatMap((response) =>
                 unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
               ),
@@ -6168,7 +6202,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   },
                 );
               }
-              const shellsStopped = yield* removeRunningShellsForTurn(turn).pipe(
+              const shellsStopped = yield* removeRunningShellsForTurn(state, turn).pipe(
                 Effect.timeoutOption(`${OPENCODE2_INTERRUPT_REQUEST_TIMEOUT_MS} millis`),
                 Effect.catchCause((cause) =>
                   Effect.logWarning("Failed to stop OpenCode 2 shells during interrupt.", {
