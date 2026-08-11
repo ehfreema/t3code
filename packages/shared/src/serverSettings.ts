@@ -50,17 +50,18 @@ export function resolveSourceControlWriterModelSelection(
   providers?: ReadonlyArray<ServerProvider>,
 ): ModelSelection {
   const selection = settings.sourceControlWriterModelSelection;
-  if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
-    return settings.textGenerationModelSelection;
-  }
-  if (providers === undefined) {
-    return selection;
+  if (selection) {
+    if (providers !== undefined) {
+      const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+      if (provider?.enabled === true && isProviderAvailable(provider)) {
+        return selection;
+      }
+    } else if (isModelSelectionProviderEnabled(settings, selection)) {
+      return selection;
+    }
   }
 
-  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
-  return provider?.enabled === true && isProviderAvailable(provider)
-    ? selection
-    : settings.textGenerationModelSelection;
+  return settings.textGenerationModelSelection;
 }
 
 export interface PersistedServerObservabilitySettings {
