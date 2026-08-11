@@ -4,7 +4,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
-import { OPENCODE2_PROVIDER } from "./OpenCode2AdapterV2.ts";
+import {
+  OPENCODE2_PROVIDER,
+  openCode2ListShells,
+  unwrapOpenCode2Data,
+} from "./OpenCode2AdapterV2.ts";
 import {
   OPENCODE2_SDK_REPLAY_PROTOCOL,
   OpenCode2ReplayController,
@@ -406,6 +410,63 @@ describe("OpenCode2AdapterV2 replay testkit", () => {
         await replay.v2.mcp.list(mcpInput);
         await replay.v2.session.instructions.entry.put(instructionsInput);
       });
+      controller.assertComplete();
+    }),
+  );
+
+  it.effect("uses the raw shell list route when the SDK omits shell.list", () =>
+    Effect.gen(function* () {
+      const controller = new OpenCode2ReplayController(transcript([]));
+      const client = makeReplayClient(controller) as unknown as {
+        client: {
+          get: (input: Record<string, unknown>) => Promise<unknown>;
+        };
+        v2: { shell?: { list?: (input: unknown) => Promise<unknown> } };
+      };
+      delete client.v2.shell;
+      let rawGetCalls = 0;
+      client.client.get = async (input) => {
+        rawGetCalls += 1;
+        assert.deepStrictEqual(input, {
+          url: "/api/shell",
+          query: { directory: "/workspace" },
+          throwOnError: true,
+        });
+        return {
+          data: {
+            location: { directory: "/workspace" },
+            data: [
+              {
+                id: "shell-running",
+                status: "running",
+                metadata: { sessionID: "ses_target" },
+              },
+            ],
+          },
+        };
+      };
+
+      const response = yield* Effect.promise(() =>
+        openCode2ListShells(
+          client as unknown as Parameters<typeof openCode2ListShells>[0],
+          { directory: "/workspace" } as Parameters<typeof openCode2ListShells>[1],
+        ),
+      );
+      const shells = yield* unwrapOpenCode2Data<
+        Array<{
+          readonly id: string;
+          readonly status: string;
+          readonly metadata: { readonly sessionID: string };
+        }>
+      >("shell.list", response);
+      assert.deepStrictEqual(shells, [
+        {
+          id: "shell-running",
+          status: "running",
+          metadata: { sessionID: "ses_target" },
+        },
+      ]);
+      assert.strictEqual(rawGetCalls, 1);
       controller.assertComplete();
     }),
   );

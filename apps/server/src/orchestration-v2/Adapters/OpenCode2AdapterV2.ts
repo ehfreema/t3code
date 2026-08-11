@@ -89,6 +89,34 @@ type ShellInfoV2 = {
   readonly metadata: { readonly sessionID?: string; readonly [key: string]: unknown };
   readonly time?: { readonly started?: number; readonly completed?: number };
 };
+type OpenCode2RawHttpClient = {
+  readonly delete: (options: Record<string, unknown>) => Promise<unknown>;
+  readonly get: (options: Record<string, unknown>) => Promise<unknown>;
+  readonly post: (options: Record<string, unknown>) => Promise<unknown>;
+};
+type OpenCode2ShellListClient = {
+  readonly client: OpenCode2RawHttpClient;
+  readonly v2?: {
+    readonly shell?: {
+      readonly list?: (input: { readonly location: SessionInfoV2["location"] }) => Promise<unknown>;
+    };
+  };
+};
+
+export const openCode2ListShells = (
+  client: OpenCode2ShellListClient,
+  location: SessionInfoV2["location"],
+): Promise<unknown> => {
+  const shellList = client.v2?.shell?.list;
+  if (shellList === undefined) {
+    return client.client.get({
+      url: "/api/shell",
+      query: { directory: location.directory },
+      throwOnError: true,
+    });
+  }
+  return shellList({ location });
+};
 type McpServer = {
   readonly name: string;
   readonly status: { readonly status?: string } | string;
@@ -1811,11 +1839,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
 
         // Session3 typed SDK omits some routes that still exist on the wire
         // (session delete, shell remove/output). Use the raw hey-api client.
-        type OpenCode2RawHttpClient = {
-          readonly delete: (options: Record<string, unknown>) => Promise<unknown>;
-          readonly get: (options: Record<string, unknown>) => Promise<unknown>;
-          readonly post: (options: Record<string, unknown>) => Promise<unknown>;
-        };
         const rawHttpClient = (): OpenCode2RawHttpClient =>
           (client as unknown as { client: OpenCode2RawHttpClient }).client;
 
@@ -5223,21 +5246,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               ),
             ),
             shells: sdkCall("shell.list", { location: state.location }, () => {
-              const shellList = (
-                client.v2 as {
-                  shell?: {
-                    list: (input: { location: SessionInfoV2["location"] }) => Promise<unknown>;
-                  };
-                }
-              ).shell?.list;
-              if (shellList === undefined) {
-                return rawHttpClient().get({
-                  url: "/api/shell",
-                  query: { directory: state.location.directory },
-                  throwOnError: true,
-                });
-              }
-              return shellList({ location: state.location });
+              return openCode2ListShells(
+                client as unknown as OpenCode2ShellListClient,
+                state.location,
+              );
             }).pipe(
               Effect.flatMap((response) =>
                 unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
