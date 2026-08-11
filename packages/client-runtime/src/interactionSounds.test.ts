@@ -55,6 +55,7 @@ function makeThread(overrides: Partial<EnvironmentThreadShell> = {}): Environmen
     updatedAt: "2026-07-11T12:00:00.000Z",
     archivedAt: null,
     settledOverride: null,
+    settledOverrideAt: null,
     settledAt: null,
     snoozedUntil: null,
     snoozedAt: null,

@@ -169,17 +169,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Option.none<OrchestrationV2ThreadProjection>(),
   );
   const coalesceGeneration = yield* Ref.make(0);
-  // Wall-clock debounce so production UI pacing is real time and TestClock
-  // harnesses (forkDetach + Effect.sleep) do not hang forever.
-  // Known client-runtime timer diagnostic under globalTimersInEffect: intentional.
-  const coalesceWallSleep = Effect.callback<void>((resume) => {
-    const handle = setTimeout(() => {
-      resume(Effect.void);
-    }, 48);
-    return Effect.sync(() => {
-      clearTimeout(handle);
-    });
-  });
+  const coalesceWallSleep = Effect.sleep("48 millis");
 
   const flushProjection = Effect.fn("EnvironmentThreadState.flushProjection")(function* (
     thread: OrchestrationV2ThreadProjection,

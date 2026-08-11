@@ -14,6 +14,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -83,11 +84,16 @@ function awaitThreadState(
   observed: Queue.Queue<EnvironmentThreadState>,
   predicate: (state: EnvironmentThreadState) => boolean,
 ) {
-  return Queue.take(observed).pipe(
-    Effect.repeat({
-      until: predicate,
-    }),
-  );
+  return Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(
+      Queue.take(observed).pipe(Effect.repeat({ until: predicate })),
+    );
+    while ((yield* Effect.sync(() => fiber.pollUnsafe())) === undefined) {
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("48 millis");
+    }
+    return yield* Fiber.join(fiber);
+  });
 }
 
 const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (options?: {
