@@ -48,6 +48,8 @@ import { openCode2PermissionExternalSubagentInput } from "./opencode2_permission
 import { assertOpenCode2PermissionExternalSubagentOutput } from "./opencode2_permission_external_subagent/output.ts";
 import { openCode2PermissionReplyFailureInput } from "./opencode2_permission_reply_failure/input.ts";
 import { assertOpenCode2PermissionReplyFailureOutput } from "./opencode2_permission_reply_failure/output.ts";
+import { openCode2PermissionReplyWithoutEventInput } from "./opencode2_permission_reply_without_event/input.ts";
+import { assertOpenCode2PermissionReplyWithoutEventOutput } from "./opencode2_permission_reply_without_event/output.ts";
 import { openCode2PermissionReplyFailureSubagentInput } from "./opencode2_permission_reply_failure_subagent/input.ts";
 import { assertOpenCode2PermissionReplyFailureSubagentOutput } from "./opencode2_permission_reply_failure_subagent/output.ts";
 import { openCode2PermissionSessionInput } from "./opencode2_permission_session/input.ts";
@@ -712,6 +714,22 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertOpenCode2PermissionReplyFailureOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_reply_without_event",
+    buildInput: openCode2PermissionReplyWithoutEventInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_reply_without_event/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionReplyWithoutEventOutput,
       },
     ],
   },
