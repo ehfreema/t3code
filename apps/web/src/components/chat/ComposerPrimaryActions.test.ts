@@ -218,7 +218,7 @@ describe("active-turn primary action", () => {
     expect(markup).toContain('aria-label="Stop generation"');
   });
 
-  it("does not add background Stop to an active pending question", () => {
+  it("keeps the active Stop without adding a background Stop to a pending question", () => {
     const markup = renderToStaticMarkup(
       createElement(ComposerPrimaryActions, {
         ...activeTurnProps,
@@ -236,7 +236,8 @@ describe("active-turn primary action", () => {
     );
 
     expect(markup).toContain("Submit answer");
-    expect(markup).not.toContain('aria-label="Stop generation"');
+    expect(markup).toContain('aria-label="Stop generation"');
+    expect(markup).not.toContain('title="Stop background work"');
   });
 
   it("does not add background Stop beside active-turn steering", () => {
