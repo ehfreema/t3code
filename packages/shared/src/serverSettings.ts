@@ -1,7 +1,4 @@
 import {
-  DEFAULT_MODEL_BY_PROVIDER,
-  DEFAULT_TEXT_GENERATION_MODEL,
-  DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   isProviderDriverKind,
   isProviderAvailable,
   type ModelSelection,
@@ -67,39 +64,17 @@ export function resolveSourceControlWriterModelSelection(
     }
   }
 
-  if (providers === undefined) {
+  if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
     return settings.textGenerationModelSelection;
   }
-
-  const globalSelection = settings.textGenerationModelSelection;
-  const globalProvider = providers.find(
-    (provider) => provider.instanceId === globalSelection.instanceId,
-  );
-  if (
-    isModelSelectionProviderEnabled(settings, globalSelection) &&
-    globalProvider?.enabled === true &&
-    isProviderAvailable(globalProvider)
-  ) {
-    return globalSelection;
+  if (providers === undefined) {
+    return selection;
   }
 
-  const fallbackProvider = providers.find(
-    (provider) =>
-      provider.enabled === true &&
-      isProviderAvailable(provider) &&
-      isModelSelectionProviderEnabled(settings, createModelSelection(provider.instanceId, "")),
-  );
-  if (!fallbackProvider) {
-    return globalSelection;
-  }
-
-  const model =
-    fallbackProvider.models.find((candidate) => candidate.isDefault)?.slug ??
-    fallbackProvider.models[0]?.slug ??
-    DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[fallbackProvider.driver] ??
-    DEFAULT_MODEL_BY_PROVIDER[fallbackProvider.driver] ??
-    DEFAULT_TEXT_GENERATION_MODEL;
-  return createModelSelection(fallbackProvider.instanceId, model);
+  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+  return provider?.enabled === true && isProviderAvailable(provider)
+    ? selection
+    : settings.textGenerationModelSelection;
 }
 
 export interface PersistedServerObservabilitySettings {

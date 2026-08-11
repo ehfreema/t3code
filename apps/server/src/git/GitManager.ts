@@ -2167,15 +2167,20 @@ export const make = Effect.gen(function* () {
 
         const textGenerationSettings = yield* serverSettingsService.getSettings.pipe(
           Effect.flatMap((settings) =>
-            providerRegistry.getProviders.pipe(
-              Effect.map((providers) => ({
-                modelSelection: ServerSettings.resolveSourceControlWriterModelSelection(
-                  settings,
-                  providers,
+            settings.sourceControlWriterModelSelection === null
+              ? Effect.succeed({
+                  modelSelection: settings.textGenerationModelSelection,
+                  style: settings.sourceControlWritingStyle,
+                })
+              : providerRegistry.getProviders.pipe(
+                  Effect.map((providers) => ({
+                    modelSelection: ServerSettings.resolveSourceControlWriterModelSelection(
+                      settings,
+                      providers,
+                    ),
+                    style: settings.sourceControlWritingStyle,
+                  })),
                 ),
-                style: settings.sourceControlWritingStyle,
-              })),
-            ),
           ),
           Effect.mapError(
             (cause) =>
