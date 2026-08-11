@@ -1,4 +1,7 @@
 import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  DEFAULT_TEXT_GENERATION_MODEL,
+  DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   isProviderDriverKind,
   isProviderAvailable,
   type ModelSelection,
@@ -52,6 +55,9 @@ export function resolveSourceControlWriterModelSelection(
   const selection = settings.sourceControlWriterModelSelection;
   if (selection) {
     if (providers !== undefined) {
+      // Provider snapshots are the live routing state. Settings can lag while
+      // an instance is being rebuilt, so do not reject a healthy snapshot
+      // based on the older persisted instance envelope.
       const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
       if (provider?.enabled === true && isProviderAvailable(provider)) {
         return selection;
@@ -61,7 +67,39 @@ export function resolveSourceControlWriterModelSelection(
     }
   }
 
-  return settings.textGenerationModelSelection;
+  if (providers === undefined) {
+    return settings.textGenerationModelSelection;
+  }
+
+  const globalSelection = settings.textGenerationModelSelection;
+  const globalProvider = providers.find(
+    (provider) => provider.instanceId === globalSelection.instanceId,
+  );
+  if (
+    isModelSelectionProviderEnabled(settings, globalSelection) &&
+    globalProvider?.enabled === true &&
+    isProviderAvailable(globalProvider)
+  ) {
+    return globalSelection;
+  }
+
+  const fallbackProvider = providers.find(
+    (provider) =>
+      provider.enabled === true &&
+      isProviderAvailable(provider) &&
+      isModelSelectionProviderEnabled(settings, createModelSelection(provider.instanceId, "")),
+  );
+  if (!fallbackProvider) {
+    return globalSelection;
+  }
+
+  const model =
+    fallbackProvider.models.find((candidate) => candidate.isDefault)?.slug ??
+    fallbackProvider.models[0]?.slug ??
+    DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[fallbackProvider.driver] ??
+    DEFAULT_MODEL_BY_PROVIDER[fallbackProvider.driver] ??
+    DEFAULT_TEXT_GENERATION_MODEL;
+  return createModelSelection(fallbackProvider.instanceId, model);
 }
 
 export interface PersistedServerObservabilitySettings {

@@ -264,21 +264,27 @@ describe("serverSettings helpers", () => {
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
   });
 
-  it("keeps an explicit OpenCode writer when settings lag a healthy provider snapshot", () => {
+  it("falls back to healthy OpenCode when the global Codex selection is unavailable", () => {
     const instanceId = ProviderInstanceId.make("opencode");
-    const sourceControlWriterModelSelection = createModelSelection(instanceId, "openai/gpt-5.6");
+    const codexId = ProviderInstanceId.make("codex");
     const settings = {
       ...DEFAULT_SERVER_SETTINGS,
       providerInstances: {
         [instanceId]: {
           driver: ProviderDriverKind.make("opencode"),
+          enabled: true,
+          config: {},
+        },
+        [codexId]: {
+          driver: ProviderDriverKind.make("codex"),
           enabled: false,
           config: {},
         },
       },
-      sourceControlWriterModelSelection,
+      textGenerationModelSelection: createModelSelection(codexId, "gpt-5.6-luna"),
+      sourceControlWriterModelSelection: null,
     };
-    const provider = {
+    const opencodeProvider = {
       instanceId,
       driver: ProviderDriverKind.make("opencode"),
       enabled: true,
@@ -299,13 +305,25 @@ describe("serverSettings helpers", () => {
       slashCommands: [],
       skills: [],
     } satisfies ServerProvider;
+    const codexProvider = {
+      instanceId: codexId,
+      driver: ProviderDriverKind.make("codex"),
+      enabled: false,
+      installed: false,
+      version: null,
+      status: "error",
+      auth: { status: "unknown" },
+      checkedAt: "2026-08-10T00:00:00.000Z",
+      availability: "unavailable",
+      unavailableReason: "Codex is not installed.",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    } satisfies ServerProvider;
 
-    expect(isModelSelectionProviderEnabled(settings, sourceControlWriterModelSelection)).toBe(
-      false,
-    );
-    expect(resolveSourceControlWriterModelSelection(settings, [provider])).toBe(
-      sourceControlWriterModelSelection,
-    );
+    expect(
+      resolveSourceControlWriterModelSelection(settings, [codexProvider, opencodeProvider]),
+    ).toEqual(createModelSelection(instanceId, "openai/gpt-5.6"));
   });
 
   it("replaces providerInstances maps so omitted instance fields are cleared", () => {
