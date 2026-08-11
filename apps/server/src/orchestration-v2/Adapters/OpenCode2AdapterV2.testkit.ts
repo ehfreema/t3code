@@ -172,7 +172,12 @@ export class OpenCode2ReplayController {
    * optional startup catalog probes can fall back to canned data when a
    * fixture does not record them, without racing the event stream.
    */
-  expectsOutbound(operation: string): boolean {
+  async expectsOutbound(operation: string): Promise<boolean> {
+    this.throwFailure();
+    while (this.claimedEventCursor === this.cursor || this.claimedResponseCursor === this.cursor) {
+      await this.changed();
+      this.throwFailure();
+    }
     const entry = this.peek();
     if (entry?.type !== "expect_outbound") return false;
     const frame = entry.frame;
@@ -471,7 +476,7 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
     input: unknown,
     canned: unknown,
   ) => {
-    if (!controller.expectsOutbound(operation)) {
+    if (!(await controller.expectsOutbound(operation))) {
       return { data: { data: canned } };
     }
     return request(operation, input);
