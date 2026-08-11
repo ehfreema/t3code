@@ -6300,6 +6300,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                         throwOnError: true,
                       }),
                   );
+                  yield* resolveRuntimeRequest(requestID, "resolved");
                   return;
                 }
                 yield* sdkCall("session.question.reply", { sessionID, requestID, answers }, () =>
@@ -6309,6 +6310,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                     questionV2Reply: { answers },
                   }),
                 );
+                yield* resolveRuntimeRequest(requestID, "resolved");
                 return;
               }
               if (requestInput.decision === undefined) {
@@ -6332,6 +6334,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   pending.permission,
                 );
               }
+              yield* resolveRuntimeRequest(requestID, "resolved");
             }).pipe(
               Effect.mapError(
                 (cause) =>
