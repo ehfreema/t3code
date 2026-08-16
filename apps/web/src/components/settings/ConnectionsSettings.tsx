@@ -39,7 +39,11 @@ import * as Option from "effect/Option";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
-import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
+import {
+  appendPairingFallbackEndpoints,
+  resolveDesktopPairingUrl,
+  resolveHostedPairingUrl,
+} from "./pairingUrls";
 import {
   applyWslEnableSelection,
   isQrShareableEndpoint,
@@ -474,14 +478,22 @@ function endpointDefaultPreferenceKey(endpoint: AdvertisedEndpoint): string {
 function resolveAdvertisedEndpointPairingUrl(
   endpoint: AdvertisedEndpoint,
   credential: string,
+  endpoints: ReadonlyArray<AdvertisedEndpoint>,
 ): string {
-  if (endpoint.compatibility.hostedHttpsApp === "compatible") {
-    return (
-      resolveHostedPairingUrl(endpoint.httpBaseUrl, credential) ??
-      resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential)
-    );
-  }
-  return resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential);
+  const pairingUrl =
+    endpoint.compatibility.hostedHttpsApp === "compatible"
+      ? (resolveHostedPairingUrl(endpoint.httpBaseUrl, credential) ??
+        resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential))
+      : resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential);
+  const fallbackUrls = endpoints
+    .filter(
+      (candidate) =>
+        candidate.id !== endpoint.id &&
+        candidate.status !== "unavailable" &&
+        candidate.reachability !== "loopback",
+    )
+    .map((candidate) => candidate.httpBaseUrl);
+  return appendPairingFallbackEndpoints(pairingUrl, fallbackUrls);
 }
 
 function resolveCurrentOriginPairingUrl(credential: string): string {
@@ -558,7 +570,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   );
   const endpointPairingUrl = useMemo(() => {
     const endpoint = selectPairingEndpoint(endpoints, defaultEndpointKey);
-    return endpoint ? resolveAdvertisedEndpointPairingUrl(endpoint, pairingLink.credential) : null;
+    return endpoint
+      ? resolveAdvertisedEndpointPairingUrl(endpoint, pairingLink.credential, endpoints)
+      : null;
   }, [defaultEndpointKey, endpoints, pairingLink.credential]);
   const endpointCopyOptions = useMemo(() => {
     const options: Array<{
@@ -573,7 +587,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       if (endpoint.status === "unavailable") {
         continue;
       }
-      const url = resolveAdvertisedEndpointPairingUrl(endpoint, pairingLink.credential);
+      const url = resolveAdvertisedEndpointPairingUrl(endpoint, pairingLink.credential, endpoints);
       options.push({
         id: endpoint.id,
         preferenceKey: endpointDefaultPreferenceKey(endpoint),
