@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -66,6 +67,7 @@ import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import * as IosBuild from "./iosBuild/runner.ts";
 import {
   projectActivityEvent,
   projectThreadDetailSnapshot,
@@ -1432,6 +1434,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.iosBuildStart]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.iosBuildStart,
+            IosBuild.startIOSBuild(input).pipe(Effect.provide(NodeChildProcessSpawner.layer)),
+            {
+              "rpc.aggregate": "ios-build",
+            },
+          ),
         [WS_METHODS.serverGetConfig]: (_input) =>
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
             "rpc.aggregate": "server",

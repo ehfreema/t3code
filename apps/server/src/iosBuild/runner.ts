@@ -1,0 +1,209 @@
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { IosBuildStartError } from "@t3tools/contracts";
+import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+
+class IosBuildProcessError extends Schema.TaggedErrorClass<IosBuildProcessError>()(
+  "IosBuildProcessError",
+  {
+    message: Schema.String,
+  },
+) {}
+
+/**
+ * Deterministic iOS app build for the on-device runtime. The client requests the
+ * build; the server runs xcodebuild itself (no agent involvement, nothing in the
+ * chat) and reports progress through `.t3/ios-build-status.json` in the workspace,
+ * which the client polls.
+ */
+
+const BUILD_TIMEOUT = Duration.minutes(30);
+
+let daemonScope: Scope.Scope | undefined;
+
+const daemonScopeEffect: Effect.Effect<Scope.Scope, never, never> = Effect.suspend(() => {
+  if (daemonScope) {
+    return Effect.succeed(daemonScope);
+  }
+  return Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    daemonScope = scope;
+    return scope;
+  });
+});
+
+const IOS_BUILD_SCRIPT = `
+set -euo pipefail
+ROOT="$1"
+STATUS="$ROOT/.t3/ios-build-status.json"
+BUILDS="$ROOT/.t3/builds"
+DD="$BUILDS/dd"
+
+write_status() {
+  mkdir -p "$ROOT/.t3"
+  printf '{"phase":"%s","message":"%s","updatedAt":"%s"}' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS"
+}
+
+fail() {
+  printf '{"phase":"failed","message":"%s","updatedAt":"%s"}' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS"
+  exit 1
+}
+
+trap 'if [ $? -ne 0 ]; then fail "Build step failed"; fi' EXIT
+
+mkdir -p "$BUILDS"
+write_status locating "Locating Xcode project"
+
+PROJ=""
+WS=""
+while IFS= read -r line; do
+  case "$line" in
+    *.xcworkspace) if [ -z "$WS" ]; then WS="$line"; fi ;;
+    *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
+  esac
+done <<EOF
+\$(find "$ROOT" -maxdepth 4 \\( -name "*.xcodeproj" -o -name "*.xcworkspace" \\) \\
+  -not -path "*/Pods/*" -not -path "*/.t3/*" -not -path "*/node_modules/*" -not -path "*/DerivedData/*" 2>/dev/null | sort)
+EOF
+
+TARGET=""
+if [ -n "$WS" ]; then
+  TARGET="$WS"
+elif [ -n "$PROJ" ]; then
+  TARGET="$PROJ"
+else
+  fail "No Xcode project or workspace found in this thread"
+fi
+
+write_status scheme "Reading Xcode schemes"
+if [ "$TARGET" = "$WS" ]; then
+  SCHEMES_JSON=\$(xcodebuild -workspace "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
+else
+  SCHEMES_JSON=\$(xcodebuild -project "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
+fi
+SCHEME=\$(python3 - "$SCHEMES_JSON" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    schemes = data["workspace"]["schemes"] if "workspace" in data else data["project"]["schemes"]
+except Exception:
+    sys.exit(1)
+if not schemes:
+    sys.exit(1)
+print(schemes[0])
+PY
+) || fail "No buildable scheme found"
+
+write_status building "Building with Xcode (this can take several minutes)"
+rm -rf "$DD"
+
+if [ "$TARGET" = "$WS" ]; then
+  xcodebuild -workspace "$TARGET" -scheme "$SCHEME" \\
+    -configuration Release \\
+    -sdk iphoneos \\
+    -destination 'generic/platform=iOS' \\
+    -derivedDataPath "$DD" \\
+    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
+    archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
+else
+  xcodebuild -project "$TARGET" -scheme "$SCHEME" \\
+    -configuration Release \\
+    -sdk iphoneos \\
+    -destination 'generic/platform=iOS' \\
+    -derivedDataPath "$DD" \\
+    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
+    archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
+fi
+
+APP=\$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
+if [ -z "$APP" ]; then
+  APP=\$(find "$DD" -maxdepth 6 -name "*.app" -not -path "*/Intermediates*" 2>/dev/null | head -n 1)
+fi
+[ -n "$APP" ] || fail "No .app produced by the build"
+
+BUNDLE_ID=\$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" 2>/dev/null || echo "")
+[ -n "$BUNDLE_ID" ] || fail "Could not read the app bundle identifier"
+
+DISPLAY_NAME=\$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist" 2>/dev/null || echo "")
+if [ -z "$DISPLAY_NAME" ]; then
+  DISPLAY_NAME=\$(/usr/libexec/PlistBuddy -c "Print :CFBundleName" "$APP/Info.plist" 2>/dev/null || basename "$APP" .app)
+fi
+
+ARTIFACT_NAME=\$(echo "$DISPLAY_NAME" | tr ' ' '-')
+write_status packaging "Packaging IPA"
+
+rm -rf "$BUILDS/Payload"
+mkdir -p "$BUILDS/Payload"
+cp -R "$APP" "$BUILDS/Payload/$DISPLAY_NAME.app"
+rm -f "$BUILDS/$ARTIFACT_NAME.ipa"
+(cd "$BUILDS" && zip -qr "$ARTIFACT_NAME.ipa" Payload)
+
+write_status manifest "Writing build manifest"
+cat > "$ROOT/.t3/ios-app.json" <<JSON
+{
+  "schemaVersion": 1,
+  "displayName": "$DISPLAY_NAME",
+  "bundleIdentifier": "$BUNDLE_ID",
+  "artifactPath": ".t3/builds/$ARTIFACT_NAME.ipa"
+}
+JSON
+
+write_status done "Build complete"
+trap - EXIT
+`;
+
+function runBuildScript(root: string) {
+  return Effect.gen(function* () {
+    const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const command = ChildProcess.make("bash", ["-c", IOS_BUILD_SCRIPT, "t3-ios-build", root], {
+      shell: false,
+    });
+    const child = yield* commandSpawner.spawn(command).pipe(
+      Effect.mapError(
+        (cause) =>
+          new IosBuildProcessError({
+            message: `Failed to spawn build: ${String(cause)}`,
+          }),
+      ),
+    );
+
+    const result = yield* Effect.all(
+      [Stream.runDrain(child.stdout), Stream.runDrain(child.stderr), child.exitCode],
+      { concurrency: 3 },
+    ).pipe(
+      Effect.mapError((cause) => new IosBuildProcessError({ message: String(cause) })),
+      Effect.timeout(BUILD_TIMEOUT),
+    );
+
+    const exitCode = result[2];
+    if (exitCode !== 0) {
+      return yield* new IosBuildProcessError({
+        message: `Build exited with code ${exitCode}`,
+      });
+    }
+  });
+}
+
+export const startIOSBuild = (input: { workspaceRoot: string; threadId: string }) =>
+  Effect.gen(function* () {
+    const paths = yield* WorkspacePaths.WorkspacePaths;
+    const root = yield* paths.normalizeWorkspaceRoot(input.workspaceRoot).pipe(
+      Effect.mapError(
+        (cause) =>
+          new IosBuildStartError({
+            message: `Workspace root is not valid: ${cause._tag}`,
+          }),
+      ),
+    );
+
+    const scope = yield* daemonScopeEffect;
+    yield* runBuildScript(root).pipe(
+      Effect.provideService(Scope.Scope, scope),
+      Effect.forkIn(scope),
+    );
+    return { started: true };
+  });

@@ -1,5 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AssetPreviewTypeValidationError, ThreadId } from "@t3tools/contracts";
+import {
+  AssetIosAppArtifactTypeValidationError,
+  AssetPreviewTypeValidationError,
+  ThreadId,
+} from "@t3tools/contracts";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
@@ -181,6 +185,65 @@ describe("AssetAccess", () => {
       });
       expect(yield* resolveAsset(token, "other.png")).toBeNull();
       expect(yield* resolveAsset(token, "../icon.png")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("issues exact workspace URLs for iOS app artifacts", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-ios-app-artifact-",
+      });
+      const buildsDirectory = path.join(root, ".t3", "builds");
+      const artifactPath = path.join(buildsDirectory, "Example.ipa");
+      const siblingPath = path.join(buildsDirectory, "Other.ipa");
+      yield* fileSystem.makeDirectory(buildsDirectory, { recursive: true });
+      yield* fileSystem.writeFile(artifactPath, new Uint8Array([80, 75, 3, 4]));
+      yield* fileSystem.writeFile(siblingPath, new Uint8Array([80, 75, 3, 4]));
+      const canonicalArtifactPath = yield* fileSystem.realPath(artifactPath);
+
+      const result = yield* issueAssetUrl({
+        resource: {
+          _tag: "ios-app-artifact",
+          threadId: ThreadId.make("thread-1"),
+          path: ".t3/builds/Example.ipa",
+        },
+        workspaceRoot: root,
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      expect(yield* resolveAsset(token, "Example.ipa")).toEqual({
+        kind: "file",
+        path: canonicalArtifactPath,
+      });
+      expect(yield* resolveAsset(token, "Other.ipa")).toBeNull();
+      expect(yield* resolveAsset(token, "../Example.ipa")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects non-IPA iOS app artifacts", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-ios-app-artifact-type-",
+      });
+      const artifactPath = path.join(root, "Example.zip");
+      yield* fileSystem.writeFile(artifactPath, new Uint8Array([80, 75, 3, 4]));
+
+      const error = yield* issueAssetUrl({
+        resource: {
+          _tag: "ios-app-artifact",
+          threadId: ThreadId.make("thread-1"),
+          path: "Example.zip",
+        },
+        workspaceRoot: root,
+      }).pipe(Effect.flip);
+
+      expect(error).toBeInstanceOf(AssetIosAppArtifactTypeValidationError);
     }).pipe(Effect.provide(testLayer)),
   );
 

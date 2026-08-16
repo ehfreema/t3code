@@ -10,6 +10,10 @@ export const AssetResource = Schema.Union([
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
   }),
+  Schema.TaggedStruct("ios-app-artifact", {
+    threadId: ThreadId,
+    path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
+  }),
   Schema.TaggedStruct("attachment", {
     attachmentId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
   }),
@@ -91,6 +95,17 @@ export class AssetPreviewTypeValidationError extends Schema.TaggedErrorClass<Ass
 ) {
   override get message(): string {
     return "Only browser documents and images can be previewed.";
+  }
+}
+
+export class AssetIosAppArtifactTypeValidationError extends Schema.TaggedErrorClass<AssetIosAppArtifactTypeValidationError>()(
+  "AssetIosAppArtifactTypeValidationError",
+  {
+    resource: AssetResource,
+  },
+) {
+  override get message(): string {
+    return "Only IPA app artifacts can be run on iPhone.";
   }
 }
 
@@ -193,6 +208,7 @@ export const AssetAccessError = Schema.Union([
   AssetWorkspaceRootNormalizationError,
   AssetWorkspacePathValidationError,
   AssetPreviewTypeValidationError,
+  AssetIosAppArtifactTypeValidationError,
   AssetWorkspaceAssetInspectionError,
   AssetWorkspaceAssetNotFoundError,
   AssetWorkspaceResolutionError,

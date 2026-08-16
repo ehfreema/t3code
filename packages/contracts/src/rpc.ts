@@ -199,6 +199,9 @@ export const WS_METHODS = {
   gitResolvePullRequest: "git.resolvePullRequest",
   gitPreparePullRequestThread: "git.preparePullRequestThread",
 
+  // iOS app runtime methods
+  iosBuildStart: "iosBuild.start",
+
   // Review methods
   reviewGetDiffPreview: "review.getDiffPreview",
   reviewGetDiffFileContents: "review.getDiffFileContents",
@@ -530,7 +533,29 @@ export const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequ
 export const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullRequestThread, {
   payload: GitPreparePullRequestThreadInput,
   success: GitPreparePullRequestThreadResult,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+});
+
+export const IosBuildStartInput = Schema.Struct({
+  workspaceRoot: Schema.String,
+  threadId: Schema.String,
+});
+
+export const IosBuildStartResult = Schema.Struct({
+  started: Schema.Boolean,
+});
+
+export class IosBuildStartError extends Schema.TaggedErrorClass<IosBuildStartError>()(
+  "IosBuildStartError",
+  {
+    message: Schema.String,
+  },
+) {}
+
+export const WsIosBuildStartRpc = Rpc.make(WS_METHODS.iosBuildStart, {
+  payload: IosBuildStartInput,
+  success: IosBuildStartResult,
+  error: Schema.Union([IosBuildStartError, EnvironmentAuthorizationError]),
 });
 
 export const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
@@ -812,6 +837,7 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
+  WsIosBuildStartRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
@@ -851,6 +877,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
+  WsIosBuildStartRpc,
   WsVcsListRefsRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,

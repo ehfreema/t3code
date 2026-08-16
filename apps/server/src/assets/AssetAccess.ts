@@ -1,6 +1,7 @@
 import type { AssetResource } from "@t3tools/contracts";
 import {
   AssetAttachmentNotFoundError,
+  AssetIosAppArtifactTypeValidationError,
   AssetPreviewTypeValidationError,
   AssetProjectFaviconInspectionError,
   AssetProjectFaviconNotFoundError,
@@ -71,6 +72,13 @@ const AssetClaimsSchema = Schema.Union([
   Schema.Struct({
     version: Schema.Literal(1),
     kind: Schema.Literal("workspace-file-exact"),
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    expiresAt: Schema.Number,
+  }),
+  Schema.Struct({
+    version: Schema.Literal(1),
+    kind: Schema.Literal("ios-app-artifact"),
     workspaceRoot: Schema.String,
     relativePath: Schema.String,
     expiresAt: Schema.Number,
@@ -180,7 +188,8 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   let sourcePath: string | undefined;
 
   switch (input.resource._tag) {
-    case "workspace-file": {
+    case "workspace-file":
+    case "ios-app-artifact": {
       if (!input.workspaceRoot) {
         return yield* new AssetWorkspaceContextNotFoundError({
           resource: input.resource,
@@ -209,7 +218,13 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
               }),
           ),
         );
-      if (!isWorkspacePreviewEntryPath(resolved.relativePath)) {
+      const isIosAppArtifact = input.resource._tag === "ios-app-artifact";
+      if (isIosAppArtifact && path.extname(resolved.relativePath).toLowerCase() !== ".ipa") {
+        return yield* new AssetIosAppArtifactTypeValidationError({
+          resource: input.resource,
+        });
+      }
+      if (!isIosAppArtifact && !isWorkspacePreviewEntryPath(resolved.relativePath)) {
         return yield* new AssetPreviewTypeValidationError({
           resource: input.resource,
         });
@@ -240,21 +255,29 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
             }),
         ),
       );
-      claims = isWorkspaceImagePreviewPath(resolved.relativePath)
+      claims = isIosAppArtifact
         ? {
             version: 1,
-            kind: "workspace-file-exact",
+            kind: "ios-app-artifact",
             workspaceRoot: canonicalWorkspaceRoot,
             relativePath: resolved.relativePath,
             expiresAt,
           }
-        : {
-            version: 1,
-            kind: "workspace-file",
-            workspaceRoot: canonicalWorkspaceRoot,
-            baseRelativePath: path.dirname(resolved.relativePath),
-            expiresAt,
-          };
+        : isWorkspaceImagePreviewPath(resolved.relativePath)
+          ? {
+              version: 1,
+              kind: "workspace-file-exact",
+              workspaceRoot: canonicalWorkspaceRoot,
+              relativePath: resolved.relativePath,
+              expiresAt,
+            }
+          : {
+              version: 1,
+              kind: "workspace-file",
+              workspaceRoot: canonicalWorkspaceRoot,
+              baseRelativePath: path.dirname(resolved.relativePath),
+              expiresAt,
+            };
       fileName = path.basename(resolved.relativePath);
       break;
     }
@@ -444,7 +467,7 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   const decodedPath = decodeRelativePath(relativePath);
   if (decodedPath === null) return null;
   const path = yield* Path.Path;
-  if (claims.kind === "workspace-file-exact") {
+  if (claims.kind === "workspace-file-exact" || claims.kind === "ios-app-artifact") {
     if (decodedPath !== path.basename(claims.relativePath)) return null;
     const exactWorkspaceFile = yield* resolveCanonicalWorkspaceFileForRequest({
       workspaceRoot: claims.workspaceRoot,
