@@ -123,6 +123,12 @@ struct PlatformRootView: View {
     }
 
     private func handle(url: URL, letOnboardingConfirmConnection: Bool) {
+        // Runtime-internal URLs are owned by the LiveContainer overlay that hosts this
+        // UI. They are not platform routes and must not surface link errors.
+        if let scheme = url.scheme?.lowercased(),
+           ["t3code-livecontainer", "livecontainer", "livecontainer2", "livecontainer3", "liveprocess"].contains(scheme) {
+            return
+        }
         do {
             let route = try PlatformDeepLinkParser.parse(url)
             if case .connection = route,

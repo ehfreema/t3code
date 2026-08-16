@@ -13,6 +13,7 @@ public struct ConnectionOnboardingView: View {
     @State private var stage = ConnectionStage.welcome
     @State private var endpoint = ""
     @State private var pairingCode = ""
+    @State private var fallbackEndpoints: [String] = []
     @State private var errorMessage: String?
     @State private var showsPermissionAction = false
     @State private var showingScanner = false
@@ -179,6 +180,7 @@ public struct ConnectionOnboardingView: View {
                         systemImage: "keyboard"
                     ) {
                         entryHeading = "Connect manually"
+                        fallbackEndpoints = []
                         errorMessage = nil
                         stage = .details
                     }
@@ -477,7 +479,8 @@ public struct ConnectionOnboardingView: View {
             connect(
                 .pair(
                     endpoint: normalized,
-                    code: pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                    code: pairingCode.trimmingCharacters(in: .whitespacesAndNewlines),
+                    fallbackEndpoints: fallbackEndpoints
                 )
             )
         } catch {
@@ -489,6 +492,7 @@ public struct ConnectionOnboardingView: View {
     private func pasteConnectionLink() {
         guard let value = UIPasteboard.general.string, !value.isEmpty else {
             entryHeading = "Connect manually"
+            fallbackEndpoints = []
             stage = .details
             errorMessage = "Copy a T3 pairing link first, or enter the details below."
             focusedField = .endpoint
@@ -508,6 +512,7 @@ public struct ConnectionOnboardingView: View {
             let details = try ConnectionDetailsParser.parse(value)
             endpoint = details.endpoint
             pairingCode = details.pairingCode ?? ""
+            fallbackEndpoints = details.fallbackEndpoints
             entryHeading = heading
             errorMessage = details.pairingCode == nil
                 ? "The link did not include a pairing code. Enter it below."
@@ -515,13 +520,20 @@ public struct ConnectionOnboardingView: View {
             showsPermissionAction = false
             if connectAutomatically, let code = details.pairingCode {
                 focusedField = nil
-                connect(.pair(endpoint: details.endpoint, code: code))
+                connect(
+                    .pair(
+                        endpoint: details.endpoint,
+                        code: code,
+                        fallbackEndpoints: details.fallbackEndpoints
+                    )
+                )
             } else {
                 stage = .details
                 focusedField = details.pairingCode == nil ? .pairingCode : nil
             }
         } catch {
             entryHeading = "Connect manually"
+            fallbackEndpoints = []
             errorMessage = error.localizedDescription
             stage = .details
             focusedField = .endpoint
@@ -537,6 +549,7 @@ public struct ConnectionOnboardingView: View {
         }
         endpoint = details.endpoint
         pairingCode = code
+        fallbackEndpoints = details.fallbackEndpoints
         errorMessage = nil
         focusedField = nil
     }
@@ -552,10 +565,11 @@ public struct ConnectionOnboardingView: View {
         stage = .checking
 
         connectionTask = Task {
-            let readiness = await readinessChecker.check(endpoint: action.endpoint)
+            let resolved = await resolveReachableEndpoint(for: action)
             guard !Task.isCancelled, connectionAttemptID == attemptID else { return }
-            switch readiness {
+            switch resolved.readiness {
             case .ready:
+                endpoint = resolved.endpoint
                 stage = .connecting
             case .localNetworkDenied:
                 errorMessage = "Allow Local Network access so this iPhone can find T3 Code on your computer."
@@ -571,8 +585,8 @@ public struct ConnectionOnboardingView: View {
             model.errorMessage = nil
             let didConnect: Bool
             switch action {
-            case let .pair(endpoint, code):
-                didConnect = await model.pair(endpoint: endpoint, token: code)
+            case let .pair(_, code, _):
+                didConnect = await model.pair(endpoint: resolved.endpoint, token: code)
             case let .activate(id, _):
                 didConnect = await model.setEnvironmentEnabled(id, enabled: true)
             }
@@ -592,6 +606,28 @@ public struct ConnectionOnboardingView: View {
                 stage = .details
             }
         }
+    }
+
+    private func resolveReachableEndpoint(
+        for action: ConnectionAction
+    ) async -> (endpoint: String, readiness: ConnectionReadiness) {
+        var sawLocalNetworkDenial = false
+        for candidate in action.probeEndpoints {
+            let readiness = await readinessChecker.check(endpoint: candidate)
+            guard !Task.isCancelled else { return (action.endpoint, .unreachable) }
+            switch readiness {
+            case .ready:
+                return (candidate, .ready)
+            case .localNetworkDenied:
+                sawLocalNetworkDenial = true
+            case .unreachable:
+                break
+            }
+        }
+        return (
+            action.endpoint,
+            sawLocalNetworkDenial ? .localNetworkDenied : .unreachable
+        )
     }
 
     @MainActor
@@ -622,13 +658,22 @@ private enum ProgressRowState {
 }
 
 private enum ConnectionAction {
-    case pair(endpoint: String, code: String)
+    case pair(endpoint: String, code: String, fallbackEndpoints: [String])
     case activate(id: String, endpoint: String)
 
     var endpoint: String {
         switch self {
-        case let .pair(endpoint, _), let .activate(_, endpoint):
+        case let .pair(endpoint, _, _), let .activate(_, endpoint):
             endpoint
+        }
+    }
+
+    var probeEndpoints: [String] {
+        switch self {
+        case let .pair(endpoint, _, fallbackEndpoints):
+            [endpoint] + fallbackEndpoints
+        case let .activate(_, endpoint):
+            [endpoint]
         }
     }
 }

@@ -5,6 +5,8 @@ import UIKit
 public struct ThreadDetailView: View {
     @SwiftUI.Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @SwiftUI.Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @SwiftUI.Environment(\.t3CodeEmbedded) private var t3CodeEmbedded
+    @SwiftUI.Environment(\.featureAppRuntime) private var appRuntime
 
     @Bindable var model: FeatureRootModel
     let thread: FeatureThread
@@ -21,6 +23,11 @@ public struct ThreadDetailView: View {
     @State private var didRestoreDraft = false
     @State private var draftSaveTask: Task<Void, Never>?
     @State private var toolSurface: FeatureThreadToolSurface?
+    @State private var isIOSAppProject = false
+    @State private var iosAppRunState = FeatureIOSAppRunState.idle
+    @State private var iosAppRunError: String?
+    @State private var iosAppBuildPhase: String?
+    @State private var iosAppBuildMessage: String?
     @FocusState private var composerFocused: Bool
 
     public init(
@@ -41,8 +48,10 @@ public struct ThreadDetailView: View {
         Group {
             if isLoading {
                 FeatureThreadOpeningView(isRefreshing: detail != nil)
+                    .transition(.opacity)
             } else if let detail {
                 timeline(detail)
+                    .transition(.opacity)
             } else {
                 ContentUnavailableView(
                     "Thread unavailable",
@@ -51,15 +60,23 @@ public struct ThreadDetailView: View {
                 )
             }
         }
+        .animation(
+            t3CodeEmbedded ? nil : .easeOut(duration: 0.12),
+            value: isLoading
+        )
         .background(T3Colors.background)
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(false)
         .t3NavigationChrome()
         .toolbar {
             ToolbarItem(placement: .principal) {
-                threadHeaderTitle
+                if t3CodeEmbedded {
+                    embeddedBarTitle
+                } else {
+                    threadHeaderTitle
+                }
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
                 threadActionsMenu
             }
         }
@@ -68,15 +85,34 @@ public struct ThreadDetailView: View {
             let restoreKey = draftKey
             isLoading = true
             _ = await model.detail(for: thread.id, force: true)
+            // Pre-render every message's markdown off the main thread while the
+            // opening state is visible. Cell configuration at mount time then
+            // hits the cache instead of parsing synchronously on the main
+            // thread, which is what stuttered the open.
+            if let loadedDetail = model.details[thread.id] {
+                await prewarmMarkdownDocuments(for: loadedDetail)
+            }
             await restoreDraft(from: restoreBaseline, key: restoreKey)
+            // Run-capability detection changes the toolbar content; complete it
+            // before the timeline mounts so the bar settles during the push
+            // transition instead of visibly re-laying-out after it.
+            await refreshIOSAppProjectDetection()
             isLoading = false
         }
         .onChange(of: draft) { scheduleDraftSave() }
         .onChange(of: attachments) { scheduleDraftSave() }
         .onChange(of: selection) { scheduleDraftSave() }
+        .onAppear {
+            if t3CodeEmbedded {
+                T3JudderProbe.start()
+            }
+        }
         .onDisappear {
             model.releaseThread(thread.id)
             persistDraftBeforeLeaving()
+        }
+        .onChange(of: currentThread.state) { _, state in
+            handleThreadStateChange(state)
         }
         .sheet(item: $toolSurface) { surface in
             NavigationStack {
@@ -105,6 +141,30 @@ public struct ThreadDetailView: View {
             Button("OK") {}
         } message: {
             Text("Your draft is still here. Check your connection and try again.")
+        }
+        .alert(
+            "Couldn’t run app",
+            isPresented: Binding(
+                get: { iosAppRunError != nil },
+                set: { if !$0 { iosAppRunError = nil } }
+            )
+        ) {
+            Button("OK") { iosAppRunError = nil }
+        } message: {
+            Text(iosAppRunError ?? "Unknown error")
+        }
+        .sheet(isPresented: Binding(
+            get: { iosAppRunState != .idle },
+            set: { if !$0 { iosAppRunState = .idle } }
+        )) {
+            FeatureIOSBuildProgressView(
+                state: iosAppRunState,
+                phase: iosAppBuildPhase,
+                message: iosAppBuildMessage
+            )
+            .presentationDetents([.height(240)])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled(iosAppRunState == .building)
         }
         .background {
             ThreadBackSwipeGestureView(
@@ -183,6 +243,12 @@ public struct ThreadDetailView: View {
         // Leave compact-width clearance for the trailing thread menu.
         .padding(.trailing, horizontalSizeClass == .compact ? 10 : 0)
         .frame(maxWidth: horizontalSizeClass == .compact ? 260 : 460, alignment: .leading)
+        // The embedded host's SwiftUI-drawn bar re-measures when the principal
+        // content updates (detail lands: title/branch/status swap), which shifted
+        // the whole bar region 10pt and visibly pushed the content down. Pin the
+        // principal to a fixed height so the bar canvas can never change size.
+        .frame(height: 41, alignment: .leading)
+        .clipped()
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
         .accessibilityAddTraits(
@@ -234,6 +300,23 @@ public struct ThreadDetailView: View {
                 Button { toolSurface = .terminal } label: {
                     Label("Terminal", systemImage: "terminal")
                 }
+                if appRuntime.availability() == .embedded,
+                   isIOSAppProject,
+                   !currentThread.isArchived {
+                    Button {
+                        Task { await runIOSApp() }
+                    } label: {
+                        switch iosAppRunState {
+                        case .idle:
+                            Label("Run", systemImage: "play.fill")
+                        case .building:
+                            Label("Building iPhone app…", systemImage: "hammer")
+                        case .running:
+                            Label("Running iPhone app…", systemImage: "play")
+                        }
+                    }
+                    .disabled(iosAppRunState != .idle)
+                }
             }
             Section {
                 if currentThread.canTogglePin, !currentThread.isArchived {
@@ -252,7 +335,10 @@ public struct ThreadDetailView: View {
                     }
                 }
                 Button {
-                    Task { _ = await model.detail(for: thread.id, force: true) }
+                    Task {
+                        _ = await model.detail(for: thread.id, force: true)
+                        await refreshIOSAppProjectDetection()
+                    }
                 } label: {
                     Label("Reload", systemImage: "arrow.clockwise")
                 }
@@ -301,6 +387,235 @@ public struct ThreadDetailView: View {
         case .done: T3Colors.success
         case .ready: T3Colors.textTertiary
         }
+    }
+
+    @MainActor
+    private func handleThreadStateChange(_ state: FeatureThreadState) {
+        // A completed turn may have produced the build manifest. Refresh the Run
+        // capability deterministically (no agent interaction).
+        guard state == .completed else { return }
+        Task { await refreshIOSAppProjectDetection() }
+    }
+
+    @MainActor
+    private func refreshIOSAppProjectDetection() async {
+        guard appRuntime.availability() == .embedded else {
+            isIOSAppProject = false
+            return
+        }
+        isIOSAppProject = await FeatureIOSProjectDetector.hasIOSAppBuild(
+            client: model.client,
+            threadID: thread.id
+        )
+    }
+
+    /// Renders every message's markdown document off the main thread while the
+    /// thread is still showing its opening state, so the transcript mounts with
+    /// a warm cache and its cells never parse synchronously on open.
+    private func prewarmMarkdownDocuments(for detail: FeatureThreadDetail) async {
+        let revisions = detail.messages
+            .filter { !$0.text.isEmpty }
+            .map { MarkdownContentRevision($0.text) }
+        guard !revisions.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for revision in revisions {
+                group.addTask {
+                    _ = await MarkdownRenderCache.shared.document(for: revision)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func runIOSApp() async {
+        guard iosAppRunState == .idle else { return }
+        iosAppRunError = nil
+
+        // Deterministic: run the existing build when it is newer than the
+        // thread's latest change; otherwise kick off the server-side build
+        // (no agent, no AI) and run when it lands.
+        if let manifest = try? await loadIOSAppManifest(),
+           let status = try? await readIOSBuildStatus(),
+           let builtAt = status.updatedAt,
+           let lastChange = currentThread.latestTurnCompletedAt,
+           lastChange <= builtAt {
+            iosAppRunState = .running
+            do {
+                let prepared = try await prepareArtifactChunksIfNeeded(manifest)
+                await runIOSApp(prepared)
+            } catch {
+                iosAppRunState = .idle
+                iosAppRunError = error.localizedDescription
+            }
+            return
+        }
+        await buildAndRunIOSApp()
+    }
+
+    /// Deterministic build + run: requests the server-side xcodebuild, polls the
+    /// build status file for progress, and runs the artifact when it lands.
+    @MainActor
+    private func buildAndRunIOSApp() async {
+        iosAppRunState = .building
+        iosAppBuildPhase = nil
+        iosAppBuildMessage = nil
+        do {
+            guard let workspaceRoot = iosAppWorkspaceRoot else {
+                throw FeatureIOSAppRunError.missingWorkspaceRoot
+            }
+            try await model.client.startIOSBuild(
+                threadID: thread.id,
+                workspaceRoot: workspaceRoot
+            )
+
+            let deadline = Date().addingTimeInterval(15 * 60)
+            while Date() < deadline {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let status = try? await readIOSBuildStatus() else { continue }
+                iosAppBuildPhase = status.phase
+                iosAppBuildMessage = status.message
+                switch status.phase {
+                case "done":
+                    let builtManifest = try await loadIOSAppManifest()
+                    let manifest = try await prepareArtifactChunksIfNeeded(builtManifest)
+                    iosAppRunState = .running
+                    iosAppBuildPhase = nil
+                    iosAppBuildMessage = nil
+                    await runIOSApp(manifest)
+                    iosAppRunState = .idle
+                    return
+                case "failed":
+                    throw FeatureIOSAppRunError.buildFailed(status.message)
+                default:
+                    continue
+                }
+            }
+            throw FeatureIOSAppRunError.buildTimedOut
+        } catch {
+            iosAppRunState = .idle
+            iosAppBuildPhase = nil
+            iosAppBuildMessage = nil
+            var message = error.localizedDescription
+            // The generic remote failure surfaces when the running server does not
+            // know the iosBuild.start RPC (started before the feature existed).
+            if message.contains("rejected the RPC request") {
+                message += "\n\nThe T3 server likely predates the iPhone build feature. Restart the server (vp run dev) and try again."
+            }
+            iosAppRunError = message
+        }
+    }
+
+    private var iosAppWorkspaceRoot: String? {
+        // Prefer the thread's own worktree: thread-scoped file reads (manifest,
+        // build status) resolve there, so the build must write there too.
+        if let worktreePath = currentThread.worktreePath,
+           !worktreePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return worktreePath
+        }
+        if let project = model.snapshot.projects.first(where: { $0.id == currentThread.projectID }),
+           !project.path.isEmpty {
+            return project.path
+        }
+        return nil
+    }
+
+    private func readIOSBuildStatus() async throws -> (
+        phase: String,
+        message: String,
+        updatedAt: Date?
+    ) {
+        let content = try await model.client.readFile(
+            threadID: thread.id,
+            path: ".t3/ios-build-status.json"
+        )
+        guard !content.isTruncated,
+              let data = content.text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FeatureIOSAppRunError.invalidBuildStatus
+        }
+        let phase = object["phase"] as? String ?? ""
+        let message = object["message"] as? String ?? ""
+        let updatedAt = (object["updatedAt"] as? String).flatMap {
+            ISO8601DateFormatter().date(from: $0)
+        }
+        return (phase, message, updatedAt)
+    }
+
+    @MainActor
+    private func prepareArtifactChunksIfNeeded(
+        _ manifest: FeatureIOSAppManifest
+    ) async throws -> FeatureIOSAppManifest {
+        if manifest.artifactChunks?.isEmpty == false {
+            return manifest
+        }
+        try await FeatureIOSAppWorkspaceCommand.createArtifactChunks(
+            client: model.client,
+            threadID: thread.id,
+            artifactPath: manifest.artifactPath
+        )
+        return try await loadIOSAppManifest()
+    }
+
+    @MainActor
+    private func runIOSApp(_ manifest: FeatureIOSAppManifest) async {
+        iosAppRunState = .running
+        defer { iosAppRunState = .idle }
+        do {
+            let artifactURL = try await reconstructIOSAppArtifact(manifest)
+            defer { try? FileManager.default.removeItem(at: artifactURL) }
+            try await appRuntime.run(manifest, artifactURL)
+        } catch {
+            iosAppRunError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func reconstructIOSAppArtifact(_ manifest: FeatureIOSAppManifest) async throws -> URL {
+        guard let chunks = manifest.artifactChunks, !chunks.isEmpty else {
+            throw FeatureIOSAppManifestError.invalidArtifactChunks
+        }
+        var artifact = Data()
+        for path in chunks {
+            let content = try await model.client.readFile(threadID: thread.id, path: path)
+            guard !content.isTruncated,
+                  let data = Data(base64Encoded: content.text, options: .ignoreUnknownCharacters) else {
+                throw FeatureIOSAppManifestError.invalidArtifactChunks
+            }
+            artifact.append(data)
+        }
+        guard !artifact.isEmpty else {
+            throw FeatureIOSAppManifestError.invalidArtifactChunks
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("t3-ios-artifact-\(UUID().uuidString).ipa")
+        try artifact.write(to: url, options: .atomic)
+        return url
+    }
+
+    @MainActor
+    private func loadIOSAppManifest() async throws -> FeatureIOSAppManifest {
+        let content = try await model.client.readFile(
+            threadID: thread.id,
+            path: FeatureIOSAppManifest.relativePath
+        )
+        guard !content.isTruncated else {
+            throw FeatureIOSAppManifestError.invalidJSON
+        }
+        return try FeatureIOSAppManifest(contents: content.text)
+    }
+
+    /// Embedded-only bar title: single line, fixed height, clipped. The embedded
+    /// canvas bar re-measures when the principal content changes at detail-load
+    /// (that was the judder), so the bar content must be structurally identical
+    /// before and after the detail lands — no metadata line, no value swaps.
+    private var embeddedBarTitle: some View {
+        Text(currentThread.title)
+            .font(T3Typography.navigationTitle)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(height: 30, alignment: .leading)
+            .frame(maxWidth: 260, alignment: .leading)
+            .clipped()
     }
 
     private func timeline(_ detail: FeatureThreadDetail) -> some View {
@@ -566,6 +881,76 @@ private enum FeatureThreadToolSurface: String, Identifiable {
     var id: String { rawValue }
 }
 
+private enum FeatureIOSAppRunState: Equatable {
+    case idle
+    case building
+    case running
+}
+
+private enum FeatureIOSAppRunError: LocalizedError {
+    case missingWorkspaceRoot
+    case invalidBuildStatus
+    case buildFailed(String)
+    case buildTimedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .missingWorkspaceRoot:
+            "This thread has no workspace root to build from."
+        case .invalidBuildStatus:
+            "The build status file could not be read."
+        case let .buildFailed(message):
+            message.isEmpty
+                ? "The iPhone build failed. Check .t3/builds/xcodebuild.log in the workspace."
+                : "The iPhone build failed: \(message)"
+        case .buildTimedOut:
+            "The iPhone build did not finish within 15 minutes."
+        }
+    }
+}
+
+/// On-screen progress for the deterministic build + run flow.
+private struct FeatureIOSBuildProgressView: View {
+    let state: FeatureIOSAppRunState
+    let phase: String?
+    let message: String?
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+            Text(state == .building ? "Building iPhone app" : "Running on iPhone")
+                .font(T3Typography.threadHeading3)
+            if let phase, !phase.isEmpty {
+                Text(message?.isEmpty == false ? message! : Self.phaseLabel(phase))
+                    .font(T3Typography.supporting)
+                    .foregroundStyle(T3Colors.textSecondary)
+                    .multilineTextAlignment(.center)
+            } else if state == .building {
+                Text("Starting the build…")
+                    .font(T3Typography.supporting)
+                    .foregroundStyle(T3Colors.textSecondary)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(T3Colors.background)
+        .accessibilityElement(children: .combine)
+    }
+
+    private static func phaseLabel(_ phase: String) -> String {
+        switch phase {
+        case "locating": "Locating the Xcode project…"
+        case "scheme": "Reading Xcode schemes…"
+        case "building": "Xcode is building (this can take a few minutes)…"
+        case "packaging": "Packaging the IPA…"
+        case "manifest": "Writing the build manifest…"
+        case "done": "Build complete"
+        default: phase
+        }
+    }
+}
+
 /// Merges a stored draft with edits made while that draft was loading. Each
 /// field is restored only if its live value still matches the value captured
 /// before the asynchronous read began.
@@ -658,6 +1043,10 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
         collectionView.contentInsetAdjustmentBehavior = .never
         collectionView.isPrefetchingEnabled = true
         collectionView.accessibilityIdentifier = "thread-transcript"
+        // Hidden until the coordinator's initial reveal: the first layout passes
+        // settle estimated cell heights, so showing the transcript immediately
+        // flashes mis-positioned content.
+        collectionView.alpha = 0
         context.coordinator.connect(to: collectionView)
         return collectionView
     }
@@ -926,15 +1315,20 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
             dataSource.apply(snapshot, animatingDifferences: false) {
                 [weak self, weak collectionView] in
                 guard let self, let collectionView else { return }
-                DispatchQueue.main.async {
-                    if shouldFollowBottom {
-                        self.scrollToBottom(
-                            collectionView,
-                            animated: !isInitialLoad && lastIDChanged
-                        )
-                    } else if let prependAnchor {
-                        self.restore(prependAnchor, in: collectionView, dataSource: dataSource)
+                // Apply completion already runs on the main queue. Scrolling here
+                // (rather than after another dispatch hop) positions the transcript
+                // before the next render pass, so an opened thread never flashes its
+                // top/center and then jumps to the bottom.
+                if shouldFollowBottom {
+                    self.scrollToBottom(
+                        collectionView,
+                        animated: !isInitialLoad && lastIDChanged
+                    )
+                    if isInitialLoad {
+                        self.revealInitialTranscript(collectionView)
                     }
+                } else if let prependAnchor {
+                    self.restore(prependAnchor, in: collectionView, dataSource: dataSource)
                 }
             }
         }
@@ -1147,6 +1541,28 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
             let target = CGPoint(x: collectionView.contentOffset.x, y: geometry.bottomOffset)
             collectionView.setContentOffset(target, animated: animated)
             (collectionView as? BottomAnchoredTranscriptCollectionView)?.maintainsBottomAnchor = true
+        }
+
+        /// The first layout passes settle estimated cell heights (and the composer
+        /// restores its draft afterwards). The transcript stays invisible until the
+        /// anchored layout geometry is stable (two consecutive equal-height passes),
+        /// then fades in — plus a hard fallback timer so an empty or quiescent
+        /// transcript can never stay hidden.
+        private func revealInitialTranscript(_ collectionView: UICollectionView) {
+            guard collectionView.alpha != 1 else { return }
+            let anchored = collectionView as? BottomAnchoredTranscriptCollectionView
+            anchored?.onInitialLayoutSettled = { [weak anchored] in
+                guard let anchored, anchored.alpha != 1 else { return }
+                UIView.animate(withDuration: 0.15) {
+                    anchored.alpha = 1
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak anchored] in
+                guard let anchored, anchored.alpha != 1 else { return }
+                UIView.animate(withDuration: 0.15) {
+                    anchored.alpha = 1
+                }
+            }
         }
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -1520,9 +1936,15 @@ private struct ThreadBackSwipeGestureView: UIViewRepresentable {
 /// Preserve the visual bottom only while the reader is already following the latest turn.
 private final class BottomAnchoredTranscriptCollectionView: UICollectionView {
     var maintainsBottomAnchor = false
+    /// Fired once the initial cell layout has settled (content height stable across
+    /// consecutive layout passes), so callers can reveal the transcript without ever
+    /// showing estimated-height content jumping.
+    var onInitialLayoutSettled: (() -> Void)?
 
     private var lastLaidOutGeometry: TranscriptViewportGeometry?
     private var isRestoringBottomAnchor = false
+    private var settledPassCount = 0
+    private var hasFiredInitialSettled = false
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -1542,11 +1964,32 @@ private final class BottomAnchoredTranscriptCollectionView: UICollectionView {
         ) else {
             return
         }
-        guard abs(contentOffset.y - bottomY) > 0.5 else { return }
+        guard abs(contentOffset.y - bottomY) > 0.5 else {
+            noteStableLayout(geometry)
+            return
+        }
 
         isRestoringBottomAnchor = true
         contentOffset = CGPoint(x: contentOffset.x, y: bottomY)
         isRestoringBottomAnchor = false
+        noteStableLayout(geometry)
+    }
+
+    private func noteStableLayout(_ geometry: TranscriptViewportGeometry) {
+        guard !hasFiredInitialSettled else { return }
+        guard geometry.contentHeight > 0 else { return }
+        if let previous = lastLaidOutGeometry,
+           abs(previous.contentHeight - geometry.contentHeight) < 0.5 {
+            settledPassCount += 1
+            guard settledPassCount >= 2 else { return }
+            hasFiredInitialSettled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.onInitialLayoutSettled?()
+            }
+        } else {
+            settledPassCount = 0
+        }
     }
 }
 

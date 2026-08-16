@@ -505,12 +505,25 @@ public actor T3Client {
         )
     }
 
+    // MARK: iOS app runtime
+
+    /// Starts a deterministic server-side iOS build for the given workspace.
+    /// Progress is reported through `.t3/ios-build-status.json` in the workspace.
+    public func startIOSBuild(workspaceRoot: String, threadID: String) async throws {
+        try await rpc.request(
+            "iosBuild.start",
+            payload: .object([
+                "workspaceRoot": .string(workspaceRoot),
+                "threadId": .string(threadID),
+            ])
+        )
+    }
+
     // MARK: VCS and source control
 
     public func refreshVCSStatus(cwd: String) async throws -> VCSStatus {
         try await rpc.request(
-            RPCMethod.vcsRefreshStatus.rawValue,
-            payload: .object(["cwd": .string(cwd)]),
+            RPCMethod.vcsRefreshStatus.rawValue,            payload: .object(["cwd": .string(cwd)]),
             as: VCSStatus.self
         )
     }

@@ -113,6 +113,12 @@ final class NativeContractExpansionTests: XCTestCase {
             ).jsonValue["threadId"]?.stringValue,
             "thread-1"
         )
+        let appArtifact = AssetResource.iosAppArtifact(
+            threadID: "thread-1",
+            path: ".t3/builds/Example.ipa"
+        ).jsonValue
+        XCTAssertEqual(appArtifact["_tag"]?.stringValue, "ios-app-artifact")
+        XCTAssertEqual(appArtifact["path"]?.stringValue, ".t3/builds/Example.ipa")
         let result = try JSONDecoder.t3.decode(
             AssetCreateURLResult.self,
             from: Data(

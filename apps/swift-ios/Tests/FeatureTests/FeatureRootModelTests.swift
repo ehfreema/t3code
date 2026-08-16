@@ -1358,6 +1358,11 @@ private final class FeatureClientStub: FeatureClient {
         sentText = text
     }
 
+    var startIOSBuildCallCount = 0
+    func startIOSBuild(threadID: String, workspaceRoot: String) async throws {
+        startIOSBuildCallCount += 1
+    }
+
     func cancelTurn(threadID: String) async throws {}
     func resolveApproval(id: String, decision: FeatureApprovalDecision) async throws {}
     func resolveUserInput(

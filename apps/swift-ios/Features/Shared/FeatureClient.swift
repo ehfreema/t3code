@@ -67,6 +67,8 @@ public protocol FeatureClient: AnyObject {
     func loadEarlierThreadTurns(id: String) async throws -> FeatureThreadDetail?
     func releaseThread(id: String)
     func sendMessage(threadID: String, text: String, selection: FeatureSelection?) async throws
+    /// Starts a deterministic server-side iOS app build (no agent involvement).
+    func startIOSBuild(threadID: String, workspaceRoot: String) async throws
     func sendMessage(
         threadID: String,
         text: String,

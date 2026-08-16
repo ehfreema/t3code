@@ -19,6 +19,7 @@ struct FeatureWorkspaceNavigationRequest: Equatable, Sendable {
 
 public struct WorkspaceView: View {
     @SwiftUI.Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @SwiftUI.Environment(\.t3CodeEmbedded) private var t3CodeEmbedded
 
     @Bindable var model: FeatureRootModel
     private let navigationRequest: FeatureWorkspaceNavigationRequest?

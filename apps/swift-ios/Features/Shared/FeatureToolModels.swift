@@ -19,6 +19,12 @@ public protocol FeatureWorkspaceAssetResolving: AnyObject {
     func workspaceAssetURL(threadID: String, path: String) async throws -> URL
 }
 
+/// Resolves one manifest-selected IPA through the server's exact-file asset capability.
+@MainActor
+public protocol FeatureIOSAppArtifactResolving: AnyObject {
+    func iosAppArtifactURL(threadID: String, path: String) async throws -> URL
+}
+
 public enum FeatureFileKind: String, Sendable, Codable {
     case file
     case directory
