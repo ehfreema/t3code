@@ -206,4 +206,14 @@ export const startIOSBuild = (input: { workspaceRoot: string; threadId: string }
       Effect.forkIn(scope),
     );
     return { started: true };
-  });
+  }).pipe(
+    // Any unexpected failure (missing services, spawner defects) becomes a
+    // readable IosBuildStartError so the client can surface the real reason
+    // instead of a generic RPC rejection.
+    Effect.catchDefect(
+      (defect) =>
+        new IosBuildStartError({
+          message: `iPhone build request failed: ${String(defect)}`,
+        }),
+    ),
+  );

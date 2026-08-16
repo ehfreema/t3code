@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -1437,7 +1438,11 @@ const makeWsRpcLayer = (
         [WS_METHODS.iosBuildStart]: (input) =>
           observeRpcEffect(
             WS_METHODS.iosBuildStart,
-            IosBuild.startIOSBuild(input).pipe(Effect.provide(NodeChildProcessSpawner.layer)),
+            IosBuild.startIOSBuild(input).pipe(
+              Effect.provide(
+                NodeChildProcessSpawner.layer.pipe(Layer.provideMerge(NodeServices.layer)),
+              ),
+            ),
             {
               "rpc.aggregate": "ios-build",
             },
