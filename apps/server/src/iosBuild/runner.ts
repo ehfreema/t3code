@@ -62,28 +62,35 @@ PROJ=""
 WS=""
 while IFS= read -r line; do
   case "$line" in
-    *.xcworkspace) if [ -z "$WS" ]; then WS="$line"; fi ;;
+    *.xcworkspace)
+      # Skip the auto-generated workspace inside a .xcodeproj bundle; it is
+      # not a real workspace and shadows the project itself.
+      case "$line" in
+        *.xcodeproj/*) ;;
+        *) if [ -z "$WS" ]; then WS="$line"; fi ;;
+      esac
+      ;;
     *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
   esac
 done <<EOF
 $(find "$ROOT" -maxdepth 4 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -not -path "*/Pods/*" -not -path "*/.t3/*" -not -path "*/node_modules/*" -not -path "*/DerivedData/*" 2>/dev/null | sort)
 EOF
 
-TARGET=""
-if [ -n "$WS" ]; then
-  TARGET="$WS"
-elif [ -n "$PROJ" ]; then
-  TARGET="$PROJ"
-else
-  fail "No Xcode project or workspace found in this thread"
-fi
+ TARGET=""
+ if [ -n "$WS" ]; then
+   TARGET="$WS"
+ elif [ -n "$PROJ" ]; then
+   TARGET="$PROJ"
+ else
+   fail "No Xcode project or workspace found in this thread"
+ fi
 
-write_status scheme "Reading Xcode schemes"
-if [ "$TARGET" = "$WS" ]; then
-  SCHEMES_JSON=$(xcodebuild -workspace "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
-else
-  SCHEMES_JSON=$(xcodebuild -project "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
-fi
+ write_status scheme "Reading Xcode schemes"
+ if [ "$TARGET" = "$WS" ]; then
+   SCHEMES_JSON=$(xcodebuild -workspace "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
+ else
+   SCHEMES_JSON=$(xcodebuild -project "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
+ fi
 SCHEME=$(python3 - "$SCHEMES_JSON" <<'PY'
 import json, sys
 try:
@@ -93,7 +100,11 @@ except Exception:
     sys.exit(1)
 if not schemes:
     sys.exit(1)
-print(schemes[0])
+# Projects often ship a macOS scheme alongside the iOS one; the iOS build
+# needs the iOS scheme. Prefer a scheme whose name mentions iOS, else the
+# first listed scheme.
+ios = [s for s in schemes if "ios" in s.lower()]
+print(ios[0] if ios else schemes[0])
 PY
 ) || fail "No buildable scheme found"
 
@@ -106,6 +117,7 @@ if [ "$TARGET" = "$WS" ]; then
     -sdk iphoneos \\
     -destination 'generic/platform=iOS' \\
     -derivedDataPath "$DD" \\
+    -archivePath "$DD/archive.xcarchive" \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
     archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
 else
@@ -114,13 +126,17 @@ else
     -sdk iphoneos \\
     -destination 'generic/platform=iOS' \\
     -derivedDataPath "$DD" \\
+    -archivePath "$DD/archive.xcarchive" \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
     archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
 fi
 
-APP=$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
+APP=$(find "$DD/archive.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
 if [ -z "$APP" ]; then
-  APP=$(find "$DD" -maxdepth 6 -name "*.app" -not -path "*/Intermediates*" 2>/dev/null | head -n 1)
+  APP=$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
+fi
+if [ -z "$APP" ]; then
+  APP=$(find "$DD" -maxdepth 8 -name "*.app" -not -path "*/Intermediates*" 2>/dev/null | head -n 1)
 fi
 [ -n "$APP" ] || fail "No .app produced by the build"
 
