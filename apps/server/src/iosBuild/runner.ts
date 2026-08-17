@@ -66,8 +66,7 @@ while IFS= read -r line; do
     *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
   esac
 done <<EOF
-\$(find "$ROOT" -maxdepth 4 \\( -name "*.xcodeproj" -o -name "*.xcworkspace" \\) \\
-  -not -path "*/Pods/*" -not -path "*/.t3/*" -not -path "*/node_modules/*" -not -path "*/DerivedData/*" 2>/dev/null | sort)
+$(find "$ROOT" -maxdepth 4 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -not -path "*/Pods/*" -not -path "*/.t3/*" -not -path "*/node_modules/*" -not -path "*/DerivedData/*" 2>/dev/null | sort)
 EOF
 
 TARGET=""
@@ -81,11 +80,11 @@ fi
 
 write_status scheme "Reading Xcode schemes"
 if [ "$TARGET" = "$WS" ]; then
-  SCHEMES_JSON=\$(xcodebuild -workspace "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
+  SCHEMES_JSON=$(xcodebuild -workspace "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
 else
-  SCHEMES_JSON=\$(xcodebuild -project "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
+  SCHEMES_JSON=$(xcodebuild -project "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
 fi
-SCHEME=\$(python3 - "$SCHEMES_JSON" <<'PY'
+SCHEME=$(python3 - "$SCHEMES_JSON" <<'PY'
 import json, sys
 try:
     data = json.loads(sys.argv[1])
@@ -119,21 +118,21 @@ else
     archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
 fi
 
-APP=\$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
+APP=$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
 if [ -z "$APP" ]; then
-  APP=\$(find "$DD" -maxdepth 6 -name "*.app" -not -path "*/Intermediates*" 2>/dev/null | head -n 1)
+  APP=$(find "$DD" -maxdepth 6 -name "*.app" -not -path "*/Intermediates*" 2>/dev/null | head -n 1)
 fi
 [ -n "$APP" ] || fail "No .app produced by the build"
 
-BUNDLE_ID=\$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" 2>/dev/null || echo "")
+BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" 2>/dev/null || echo "")
 [ -n "$BUNDLE_ID" ] || fail "Could not read the app bundle identifier"
 
-DISPLAY_NAME=\$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist" 2>/dev/null || echo "")
+DISPLAY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist" 2>/dev/null || echo "")
 if [ -z "$DISPLAY_NAME" ]; then
-  DISPLAY_NAME=\$(/usr/libexec/PlistBuddy -c "Print :CFBundleName" "$APP/Info.plist" 2>/dev/null || basename "$APP" .app)
+  DISPLAY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleName" "$APP/Info.plist" 2>/dev/null || basename "$APP" .app)
 fi
 
-ARTIFACT_NAME=\$(echo "$DISPLAY_NAME" | tr ' ' '-')
+ARTIFACT_NAME=$(echo "$DISPLAY_NAME" | tr ' ' '-')
 write_status packaging "Packaging IPA"
 
 rm -rf "$BUILDS/Payload"
