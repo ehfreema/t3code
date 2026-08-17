@@ -24,6 +24,7 @@ public struct AddProjectView: View {
     }
 
     @SwiftUI.Environment(\.dismiss) private var dismiss
+    @SwiftUI.Environment(\.t3CodeEmbedded) private var t3CodeEmbedded
     @Bindable var model: FeatureRootModel
 
     @State private var selectedEnvironmentID: String?
@@ -57,50 +58,11 @@ public struct AddProjectView: View {
     }
 
     public var body: some View {
-        NavigationStack {
-            Group {
-                if let environment = selectedEnvironment {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 22) {
-                            if environments.count > 1 {
-                                environmentPicker(environment)
-                            }
-                            modePicker
-                            if let errorMessage {
-                                errorBanner(errorMessage)
-                            }
-                            switch mode {
-                            case .folder:
-                                localProjectForm(environment)
-                            case .repository:
-                                repositoryProjectForm(environment)
-                            }
-                            if showsFolderBrowser {
-                                folderBrowser(environment)
-                            }
-                        }
-                        .padding(.horizontal, 18)
-                        .padding(.top, 14)
-                        .padding(.bottom, 32)
-                        .disabled(isSubmitting)
-                    }
-                    .scrollDismissesKeyboard(.interactively)
-                } else {
-                    ContentUnavailableView(
-                        "Environment unavailable",
-                        systemImage: "server.rack",
-                        description: Text("Reconnect a T3 environment before adding a project.")
-                    )
-                }
-            }
-            .background(T3Colors.background)
-            .navigationTitle("Add project")
-            .navigationBarTitleDisplayMode(.inline)
-            .t3NavigationChrome()
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
+        Group {
+            if t3CodeEmbedded {
+                embeddedContent
+            } else {
+                standardContent
             }
         }
         .onAppear(perform: selectEnvironmentIfNeeded)
@@ -126,6 +88,95 @@ public struct AddProjectView: View {
             resetEnvironmentState()
             await loadDirectory(browsePath, updateSelection: false)
             await loadDiscovery()
+        }
+    }
+
+    /// The embedded host mis-lays-out SwiftUI-drawn navigation chrome when a
+    /// hosted view re-renders (the same re-measure that juddered the thread
+    /// header). This sheet re-renders on every folder browse, so embedded mode
+    /// draws its own fixed header instead of a navigation bar.
+    private var embeddedContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(T3Colors.textSecondary)
+                        .frame(width: T3Metrics.minimumTapTarget, height: T3Metrics.minimumTapTarget)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel")
+
+                Text("Add project")
+                    .font(T3Typography.navigationTitle)
+                    .foregroundStyle(T3Colors.textPrimary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 48)
+            .background(T3Colors.sheet)
+
+            formContent
+        }
+        .background(T3Colors.background)
+    }
+
+    private var standardContent: some View {
+        NavigationStack {
+            formContent
+                .background(T3Colors.background)
+                .navigationTitle("Add project")
+                .navigationBarTitleDisplayMode(.inline)
+                .t3NavigationChrome()
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var formContent: some View {
+        Group {
+            if let environment = selectedEnvironment {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 22) {
+                        if environments.count > 1 {
+                            environmentPicker(environment)
+                        }
+                        modePicker
+                        if let errorMessage {
+                            errorBanner(errorMessage)
+                        }
+                        switch mode {
+                        case .folder:
+                            localProjectForm(environment)
+                        case .repository:
+                            repositoryProjectForm(environment)
+                        }
+                        if showsFolderBrowser {
+                            folderBrowser(environment)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 14)
+                    .padding(.bottom, 32)
+                    .disabled(isSubmitting)
+                }
+                .scrollDismissesKeyboard(.interactively)
+            } else {
+                ContentUnavailableView(
+                    "Environment unavailable",
+                    systemImage: "server.rack",
+                    description: Text("Reconnect a T3 environment before adding a project.")
+                )
+            }
         }
     }
 
