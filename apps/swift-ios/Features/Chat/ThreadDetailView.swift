@@ -70,14 +70,20 @@ public struct ThreadDetailView: View {
         .t3NavigationChrome()
         .toolbar {
             ToolbarItem(placement: .principal) {
-                if t3CodeEmbedded {
-                    embeddedBarTitle
-                } else {
-                    threadHeaderTitle
-                }
+                threadHeaderTitle
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 threadActionsMenu
+            }
+        }
+        // Embedded mode draws its own fixed header (see embeddedChrome) and hides
+        // the SwiftUI-drawn bar: the bar canvas re-measures when the content
+        // swaps at detail-load and the hosting representable mis-lays it out,
+        // which was the +10pt judder the probe captured on device.
+        .toolbar(t3CodeEmbedded ? .hidden : .visible, for: .navigationBar)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if t3CodeEmbedded {
+                embeddedChrome
             }
         }
         .task(id: thread.id) {
@@ -160,11 +166,22 @@ public struct ThreadDetailView: View {
             FeatureIOSBuildProgressView(
                 state: iosAppRunState,
                 phase: iosAppBuildPhase,
-                message: iosAppBuildMessage
+                message: iosAppBuildMessage,
+                onRetry: {
+                    iosAppRunState = .idle
+                    iosAppBuildPhase = nil
+                    iosAppBuildMessage = nil
+                    Task { await runIOSApp() }
+                },
+                onDismiss: {
+                    iosAppRunState = .idle
+                    iosAppBuildPhase = nil
+                    iosAppBuildMessage = nil
+                }
             )
-            .presentationDetents([.height(240)])
+            .presentationDetents([.height(260)])
             .presentationDragIndicator(.visible)
-            .interactiveDismissDisabled(iosAppRunState == .building)
+            .interactiveDismissDisabled(iosAppRunState == .building && iosAppBuildPhase != "failed")
         }
         .background {
             ThreadBackSwipeGestureView(
@@ -492,16 +509,16 @@ public struct ThreadDetailView: View {
             }
             throw FeatureIOSAppRunError.buildTimedOut
         } catch {
-            iosAppRunState = .idle
-            iosAppBuildPhase = nil
-            iosAppBuildMessage = nil
             var message = error.localizedDescription
-            // The generic remote failure surfaces when the running server does not
-            // know the iosBuild.start RPC (started before the feature existed).
             if message.contains("rejected the RPC request") {
-                message += "\n\nThe T3 server likely predates the iPhone build feature. Restart the server (vp run dev) and try again."
+                message = "Server doesn't support iPhone builds. Restart it: npx vp run dev"
             }
-            iosAppRunError = message
+            // Keep the sheet open and show the error inside it, instead of
+            // dismissing the sheet and relying on a separate alert that can be
+            // swallowed by the sheet's dismissal animation.
+            iosAppBuildPhase = "failed"
+            iosAppBuildMessage = message
+            // Leave iosAppRunState as .building so the sheet stays visible.
         }
     }
 
@@ -604,18 +621,34 @@ public struct ThreadDetailView: View {
         return try FeatureIOSAppManifest(contents: content.text)
     }
 
-    /// Embedded-only bar title: single line, fixed height, clipped. The embedded
-    /// canvas bar re-measures when the principal content changes at detail-load
-    /// (that was the judder), so the bar content must be structurally identical
-    /// before and after the detail lands — no metadata line, no value swaps.
-    private var embeddedBarTitle: some View {
-        Text(currentThread.title)
-            .font(T3Typography.navigationTitle)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(height: 30, alignment: .leading)
-            .frame(maxWidth: 260, alignment: .leading)
-            .clipped()
+    /// Embedded-only chrome: a fixed-height header drawn in the content flow
+    /// instead of the SwiftUI-drawn navigation bar. The probe showed the bar
+    /// canvas growing 54→64pt when the detail lands (every open, every time),
+    /// pushing the transcript down 10pt; a fixed inset can never re-measure.
+    private var embeddedChrome: some View {
+        HStack(spacing: 8) {
+            Button {
+                onNavigateBack()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(T3Colors.accent)
+                    .frame(width: T3Metrics.minimumTapTarget, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back")
+
+            threadHeaderTitle
+
+            Spacer(minLength: 8)
+
+            threadActionsMenu
+        }
+        .padding(.leading, 4)
+        .padding(.trailing, 16)
+        .frame(height: 44)
+        .background(T3Colors.sheet)
     }
 
     private func timeline(_ detail: FeatureThreadDetail) -> some View {
@@ -914,22 +947,44 @@ private struct FeatureIOSBuildProgressView: View {
     let state: FeatureIOSAppRunState
     let phase: String?
     let message: String?
+    var onRetry: (() -> Void)? = nil
+    var onDismiss: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.large)
-            Text(state == .building ? "Building iPhone app" : "Running on iPhone")
-                .font(T3Typography.threadHeading3)
-            if let phase, !phase.isEmpty {
-                Text(message?.isEmpty == false ? message! : Self.phaseLabel(phase))
+            if phase == "failed" {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 32))
+                    .foregroundStyle(T3Colors.danger)
+                Text("Build failed")
+                    .font(T3Typography.threadHeading3)
+                Text(message ?? "The iPhone build failed.")
                     .font(T3Typography.supporting)
                     .foregroundStyle(T3Colors.textSecondary)
                     .multilineTextAlignment(.center)
-            } else if state == .building {
-                Text("Starting the build…")
-                    .font(T3Typography.supporting)
-                    .foregroundStyle(T3Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
+                    Button("Dismiss") { onDismiss?() }
+                        .buttonStyle(.bordered)
+                    Button("Retry") { onRetry?() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(.top, 8)
+            } else {
+                ProgressView()
+                    .controlSize(.large)
+                Text(state == .building ? "Building iPhone app" : "Running on iPhone")
+                    .font(T3Typography.threadHeading3)
+                if let phase, !phase.isEmpty {
+                    Text(message?.isEmpty == false ? message! : Self.phaseLabel(phase))
+                        .font(T3Typography.supporting)
+                        .foregroundStyle(T3Colors.textSecondary)
+                        .multilineTextAlignment(.center)
+                } else if state == .building {
+                    Text("Starting the build…")
+                        .font(T3Typography.supporting)
+                        .foregroundStyle(T3Colors.textSecondary)
+                }
             }
         }
         .padding(24)
