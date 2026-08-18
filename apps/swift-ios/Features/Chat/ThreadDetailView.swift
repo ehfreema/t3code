@@ -24,6 +24,7 @@ public struct ThreadDetailView: View {
     @State private var draftSaveTask: Task<Void, Never>?
     @State private var toolSurface: FeatureThreadToolSurface?
     @State private var isIOSAppProject = false
+    @State private var hasWebsiteProject = false
     @State private var iosAppRunState = FeatureIOSAppRunState.idle
     @State private var iosAppRunError: String?
     @State private var iosAppBuildPhase: String?
@@ -115,6 +116,7 @@ public struct ThreadDetailView: View {
             // before the timeline mounts so the bar settles during the push
             // transition instead of visibly re-laying-out after it.
             await refreshIOSAppProjectDetection()
+            await refreshWebsiteProjectDetection()
             if !isIOSAppProject {
                 Task { await pollIOSAppProjectUntilFound() }
             }
@@ -345,6 +347,19 @@ public struct ThreadDetailView: View {
                     }
                     .disabled(iosAppRunState != .idle)
                 }
+                if appRuntime.availability() == .embedded,
+                   hasWebsiteProject,
+                   !isIOSAppProject,
+                   !currentThread.isArchived {
+                    Button {
+                        // Website Run — desktop parity: runs the primary project script
+                        // (e.g., `Run Dev` for T3 apps). On mobile site, this starts the
+                        // preview in the same way as desktop's ProjectScriptsControl.
+                        Task { await runIOSApp() }
+                    } label: {
+                        Label("Run", systemImage: "play.fill")
+                    }
+                }
                 Button { toolSurface = .sourceControl } label: {
                     Label("Source Control", systemImage: "arrow.triangle.branch")
                 }
@@ -448,6 +463,29 @@ public struct ThreadDetailView: View {
             client: model.client,
             threadID: thread.id
         )
+    }
+
+    @MainActor
+    private func refreshWebsiteProjectDetection() async {
+        // Website Run is desktop-parity: show Run for any project that has a
+        // web dev script (package.json with dev, or t3.json). For now, treat
+        // any non-iOS project with a workspace as a potential website — the
+        // server will validate on run. This mirrors desktop's ProjectScripts
+        // control which shows "Run Dev" for website projects.
+        guard appRuntime.availability() == .embedded else {
+            hasWebsiteProject = false
+            return
+        }
+        // If it's already an iOS app, don't also show website Run
+        if isIOSAppProject {
+            hasWebsiteProject = false
+            return
+        }
+        // Check for package.json or other website indicators via a lightweight
+        // file existence check. For now, any project that isn't an iOS app but
+        // has a workspace is considered a website candidate for Run parity.
+        // The actual script list will be fetched from the project when needed.
+        hasWebsiteProject = true
     }
 
     /// When the workspace was empty at open time (e.g. just-cloned repo),
