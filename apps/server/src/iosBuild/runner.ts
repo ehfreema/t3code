@@ -42,6 +42,7 @@ ROOT="$1"
 STATUS="$ROOT/.t3/ios-build-status.json"
 BUILDS="$ROOT/.t3/builds"
 DD="$BUILDS/dd"
+FAILED=0
 
 write_status() {
   mkdir -p "$ROOT/.t3"
@@ -49,11 +50,12 @@ write_status() {
 }
 
 fail() {
+  FAILED=1
   printf '{"phase":"failed","message":"%s","updatedAt":"%s"}' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS"
   exit 1
 }
 
-trap 'if [ $? -ne 0 ]; then fail "Build step failed"; fi' EXIT
+trap 'status=$?; if [ "$FAILED" -eq 0 ] && [ "$status" -ne 0 ]; then write_status failed "Build step failed; see .t3/builds/xcodebuild.log"; fi' EXIT
 
 mkdir -p "$BUILDS"
 write_status locating "Locating Xcode project"
