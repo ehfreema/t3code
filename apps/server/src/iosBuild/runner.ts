@@ -175,25 +175,32 @@ if [ -z "$APP" ]; then
     PBX="$TARGET/project.pbxproj"
     if [ -f "$PBX" ]; then
       cp "$PBX" "$PBX.t3bak" 2>/dev/null || true
-      python3 - "$PBX" <<'PYEOF' 2>/dev/null || true
+      # Remove the entire SwiftLintPlugin package and all its products.
+      # This is the Build Tool Plugin that fails the build when strict.
+      # Use Python to handle the multi-line block correctly.
+      SWIFT_LINT=NO python3 - "$PBX" <<'PYEOF' 2>/dev/null || true
 import re, sys
 pbx_path = sys.argv[1]
 text = open(pbx_path).read()
-# Remove the XCRemoteSwiftPackageReference block for SwiftLintPlugin (5-6 lines)
-text = re.sub(r'[0-9A-F]{24} /\* XCRemoteSwiftPackageReference "SwiftLintPlugin" \*/ = \{[^}]*\};\n', '', text)
-# Remove any remaining SwiftLint product lines (productRef, package product)
+# Remove the XCRemoteSwiftPackageReference block for SwiftLintPlugin
+text = re.sub(r'[0-9A-F]{24} /\* XCRemoteSwiftPackageReference "SwiftLintPlugin" \*/ = \{[^}]*\};\n', '', text, flags=re.DOTALL)
+# Remove the package product blocks for SwiftLint
+text = re.sub(r'[0-9A-F]{24} /\* SwiftLint \*/ = \{[^}]*\};\n', '', text, flags=re.DOTALL)
+# Remove any remaining SwiftLint references (productRef lines, etc.)
 text = re.sub(r'[^\n]*SwiftLint[^\n]*\n', '', text)
+# Also remove the SwiftLint package from the packages array if present
+text = re.sub(r',\n\s*[0-9A-F]{24} /\* XCRemoteSwiftPackageReference "SwiftLintPlugin" \*/,', '', text)
 open(pbx_path, 'w').write(text)
 PYEOF
       if [ "$TARGET" = "$WS" ]; then
-        xcodebuild -workspace "$TARGET" -scheme "$SCHEME" \\
+        SWIFT_LINT=NO xcodebuild -workspace "$TARGET" -scheme "$SCHEME" \\
           -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \\
           -derivedDataPath "$DD" -archivePath "$DD/archive.xcarchive" \\
           -skipPackagePluginValidation \\
           CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
           archive > "$BUILDS/xcodebuild.log" 2>&1 || true
       else
-        xcodebuild -project "$TARGET" -scheme "$SCHEME" \\
+        SWIFT_LINT=NO xcodebuild -project "$TARGET" -scheme "$SCHEME" \\
           -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \\
           -derivedDataPath "$DD" -archivePath "$DD/archive.xcarchive" \\
           -skipPackagePluginValidation \\
