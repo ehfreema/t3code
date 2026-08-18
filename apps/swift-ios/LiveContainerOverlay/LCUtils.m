@@ -213,9 +213,9 @@
 
 + (NSURL *)storeBundlePath {
     if ([self store] == SideStore) {
-        return [LCSharedUtils.appGroupPath URLByAppendingPathComponent:@"Apps/com.SideStore.SideStore/App.app"];
+        return [LCSharedUtils.storeAppGroupPath URLByAppendingPathComponent:@"Apps/com.SideStore.SideStore/App.app"];
     } else {
-        return [LCSharedUtils.appGroupPath URLByAppendingPathComponent:@"Apps/com.rileytestut.AltStore/App.app"];
+        return [LCSharedUtils.storeAppGroupPath URLByAppendingPathComponent:@"Apps/com.rileytestut.AltStore/App.app"];
     }
 }
 
@@ -396,7 +396,7 @@
 }
 
 + (void)changeMainExecutableTo:(NSString *)exec error:(NSError **)error {
-    NSURL *infoPath = [LCSharedUtils.appGroupPath URLByAppendingPathComponent:@"Apps/codes.t3.t3code-live/App.app/Info.plist"];
+    NSURL *infoPath = [LCSharedUtils.appGroupPath URLByAppendingPathComponent:@"LiveContainer/Applications/codes.t3.t3code-live.app/Info.plist"];
     NSMutableDictionary *infoDict = [NSMutableDictionary dictionaryWithContentsOfURL:infoPath];
     if (!infoDict) return;
 

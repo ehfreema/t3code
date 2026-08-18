@@ -205,9 +205,69 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
     static NSURL *appGroupPath = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        appGroupPath = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:[LCSharedUtils appGroupID]];
+        NSURL *sharedPath = [self storeAppGroupPath];
+        if (sharedPath) {
+            appGroupPath = [sharedPath URLByAppendingPathComponent:@"T3CodeLive" isDirectory:YES];
+            [NSFileManager.defaultManager createDirectoryAtURL:appGroupPath
+                                    withIntermediateDirectories:YES
+                                                     attributes:nil
+                                                          error:nil];
+        }
     });
     return appGroupPath;
+}
+
++ (NSURL*) storeAppGroupPath {
+    return [NSFileManager.defaultManager
+        containerURLForSecurityApplicationGroupIdentifier:[LCSharedUtils appGroupID]];
+}
+
++ (void)migrateLegacyT3Data {
+    NSURL *sharedPath = [self storeAppGroupPath];
+    NSURL *isolatedPath = [self appGroupPath];
+    if (!sharedPath || !isolatedPath) {
+        return;
+    }
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSUserDefaults *storeDefaults = [[NSUserDefaults alloc] initWithSuiteName:[self appGroupID]];
+    NSArray *oldSchemes = [storeDefaults arrayForKey:@"LCGuestURLSchemes"];
+    if ([oldSchemes isKindOfClass:NSArray.class]) {
+        NSMutableArray *cleanSchemes = [oldSchemes mutableCopy];
+        [cleanSchemes removeObject:@"t3code-livecontainer"];
+        [storeDefaults setObject:cleanSchemes forKey:@"LCGuestURLSchemes"];
+    }
+
+    NSURL *legacyRoot = [sharedPath URLByAppendingPathComponent:@"LiveContainer" isDirectory:YES];
+    NSURL *isolatedRoot = [isolatedPath URLByAppendingPathComponent:@"LiveContainer" isDirectory:YES];
+    [fm createDirectoryAtURL:isolatedRoot withIntermediateDirectories:YES attributes:nil error:nil];
+
+    // Move only T3's previous host data. Never move or delete the stock
+    // LiveContainer root or another guest's data.
+    NSURL *legacyApp = [[legacyRoot URLByAppendingPathComponent:@"Applications" isDirectory:YES]
+        URLByAppendingPathComponent:@"codes.t3.t3code-live.app" isDirectory:YES];
+    NSURL *isolatedApps = [isolatedRoot URLByAppendingPathComponent:@"Applications" isDirectory:YES];
+    NSURL *isolatedApp = [isolatedApps URLByAppendingPathComponent:@"codes.t3.t3code-live.app" isDirectory:YES];
+    if ([fm fileExistsAtPath:legacyApp.path] && ![fm fileExistsAtPath:isolatedApp.path]) {
+        [fm createDirectoryAtURL:isolatedApps withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm moveItemAtURL:legacyApp toURL:isolatedApp error:nil];
+
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfURL:
+            [isolatedApp URLByAppendingPathComponent:@"LCAppInfo.plist"]];
+        NSString *dataUUID = info[@"LCDataUUID"];
+        if (dataUUID.length > 0) {
+            for (NSString *component in @[@"Data/Application", @"Data/AppGroup"]) {
+                NSURL *legacyData = [[legacyRoot URLByAppendingPathComponent:component isDirectory:YES]
+                    URLByAppendingPathComponent:dataUUID isDirectory:YES];
+                NSURL *isolatedDataRoot = [isolatedRoot URLByAppendingPathComponent:component isDirectory:YES];
+                NSURL *isolatedData = [isolatedDataRoot URLByAppendingPathComponent:dataUUID isDirectory:YES];
+                if ([fm fileExistsAtPath:legacyData.path] && ![fm fileExistsAtPath:isolatedData.path]) {
+                    [fm createDirectoryAtURL:isolatedDataRoot withIntermediateDirectories:YES attributes:nil error:nil];
+                    [fm moveItemAtURL:legacyData toURL:isolatedData error:nil];
+                }
+            }
+        }
+    }
 }
 
 + (NSString *)certificatePassword {
@@ -217,6 +277,10 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
     // host app's own defaults so the certificate password is found regardless.
     if (!password && nud != NSUserDefaults.standardUserDefaults) {
         password = [NSUserDefaults.standardUserDefaults objectForKey:@"LCCertificatePassword"];
+    }
+    if (!password) {
+        NSUserDefaults *storeDefaults = [[NSUserDefaults alloc] initWithSuiteName:[self appGroupID]];
+        password = [storeDefaults objectForKey:@"LCCertificatePassword"];
     }
     return password;
 }

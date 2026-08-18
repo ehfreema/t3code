@@ -39,7 +39,9 @@ bool sideStoreExist = false;
 }
 + (instancetype)lcSharedDefaults {
     if(!lcUserDefaults) {
-        lcSharedDefaults = [[NSUserDefaults alloc] initWithSuiteName: [LCSharedUtils appGroupID]];
+        // T3 Code Live is a separate LiveContainer instance. Its host
+        // settings must not overwrite stock LiveContainer's shared defaults.
+        lcSharedDefaults = NSUserDefaults.standardUserDefaults;
     }
     return lcSharedDefaults;
 }
@@ -357,8 +359,7 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
 
     // not found locally, let's look for the app in shared folder
     if(!guestAppInfo) {
-        NSURL *appGroupPath = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:[LCSharedUtils appGroupID]];
-        appGroupFolder = [appGroupPath URLByAppendingPathComponent:@"LiveContainer"];
+        appGroupFolder = [[LCSharedUtils appGroupPath] URLByAppendingPathComponent:@"LiveContainer"];
         bundlePath = [NSString stringWithFormat:@"%@/Applications/%@", appGroupFolder.path, selectedApp];
         guestAppInfo = [NSDictionary dictionaryWithContentsOfFile:[NSString stringWithFormat:@"%@/LCAppInfo.plist", bundlePath]];
         isSharedBundle = true;
@@ -748,9 +749,9 @@ int LiveContainerMain(int argc, char *argv[]) {
     lcMainBundle = [NSBundle mainBundle];
     lcUserDefaults = NSUserDefaults.standardUserDefaults;
     
-    lcSharedDefaults = [[NSUserDefaults alloc] initWithSuiteName: [LCSharedUtils appGroupID]];
+    lcSharedDefaults = NSUserDefaults.standardUserDefaults;
     lcAppUrlScheme = NSBundle.mainBundle.infoDictionary[@"CFBundleURLTypes"][0][@"CFBundleURLSchemes"][0];
-    lcAppGroupPath = [[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:[NSClassFromString(@"LCSharedUtils") appGroupID]] path];
+    lcAppGroupPath = [LCSharedUtils.appGroupPath.path copy];
     isLiveProcess = [lcAppUrlScheme isEqualToString:@"liveprocess"];
     setenv("LC_HOME_PATH", getenv("HOME"), 0);
 
@@ -939,8 +940,7 @@ int LiveContainerMain(int argc, char *argv[]) {
     if ([lcUserDefaults boolForKey:@"LCLoadTweaksToSelf"]) {
         NSString *tweakFolder = nil;
         if (isSharedBundle) {
-            NSURL *appGroupPath = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:[LCSharedUtils appGroupID]];
-            tweakFolder = [appGroupPath.path stringByAppendingPathComponent:@"LiveContainer/Tweaks"];
+            tweakFolder = [[LCSharedUtils.appGroupPath.path stringByAppendingPathComponent:@"LiveContainer/Tweaks"] copy];
         } else {
             NSString *docPath = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].lastObject.path;
             tweakFolder = [docPath stringByAppendingPathComponent:@"Tweaks"];

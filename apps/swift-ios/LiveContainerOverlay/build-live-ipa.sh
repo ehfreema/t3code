@@ -95,6 +95,22 @@ if shared_source.count(old_status_check) != 1:
     raise SystemExit("LiveContainer multi-instance status check changed.")
 shared_model.write_text(shared_source.replace(old_status_check, new_status_check))
 
+utils_extensions = root / "LiveContainerSwiftUI/Utilities/LCUtilsExtensions.swift"
+utils_extensions_source = utils_extensions.read_text()
+old_app_group_defaults = "public static let appGroupUserDefault = UserDefaults.init(suiteName: LCSharedUtils.appGroupID()) ?? UserDefaults.standard"
+new_app_group_defaults = "public static let appGroupUserDefault = UserDefaults.standard"
+if utils_extensions_source.count(old_app_group_defaults) != 1:
+    raise SystemExit("LiveContainer app-group defaults declaration changed.")
+utils_extensions.write_text(utils_extensions_source.replace(old_app_group_defaults, new_app_group_defaults))
+
+app_entry = root / "LiveContainerSwiftUI/App/LiveContainerSwiftUIApp.swift"
+app_entry_source = app_entry.read_text()
+old_init = "    init() {\n"
+new_init = "    init() {\n        LCSharedUtils.migrateLegacyT3Data()\n"
+if app_entry_source.count(old_init) != 1:
+    raise SystemExit("LiveContainer SwiftUI app initializer changed.")
+app_entry.write_text(app_entry_source.replace(old_init, new_init))
+
 shared_utils = root / "LiveContainer/LCSharedUtils.m"
 shared_utils_source = shared_utils.read_text()
 old_schemes = '@[@"livecontainer", @"livecontainer2", @"livecontainer3"]'
@@ -162,6 +178,9 @@ cp \
 cp \
     "$SCRIPT_DIRECTORY/LCSharedUtils.m" \
     "$LIVECONTAINER_DIRECTORY/LiveContainer/LCSharedUtils.m"
+cp \
+    "$SCRIPT_DIRECTORY/LCSharedUtils.h" \
+    "$LIVECONTAINER_DIRECTORY/LiveContainer/LCSharedUtils.h"
 cp \
     "$SCRIPT_DIRECTORY/LCBootstrap.m" \
     "$LIVECONTAINER_DIRECTORY/LiveContainer/LCBootstrap.m"
