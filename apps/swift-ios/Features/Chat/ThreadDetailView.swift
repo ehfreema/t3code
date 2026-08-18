@@ -469,11 +469,24 @@ public struct ThreadDetailView: View {
 
     @MainActor
     private func refreshWebsiteProjectDetection() async {
-        // Temporarily disabled — website Run was incorrectly showing on pure
-        // iOS repos. Proper website detection needs a more specific check
-        // (e.g., t3.json with previewUrl or package.json at workspace root,
-        // not just any package.json). For now, only iOS Run shows.
-        hasWebsiteProject = false
+        guard appRuntime.availability() == .embedded else {
+            hasWebsiteProject = false
+            return
+        }
+        // Show website Run only for actual website projects. Check for a
+        // package.json at the workspace root (not just any package.json in
+        // .t3 or subdirectories) so pure iOS repos like Harbour don't get a
+        // spurious Run Website.
+        if let files = try? await model.client.searchThreadFiles(
+            threadID: thread.id, query: "package.json", limit: 5
+        ) {
+            // Only count package.json at shallow depth (workspace root), not in
+            // .t3/builds or DerivedData
+            let rootPackage = files.first { $0.path == "package.json" || $0.path.hasSuffix("/package.json") && !$0.path.contains(".t3/") && $0.path.filter({ $0 == "/" }).count <= 2 }
+            hasWebsiteProject = rootPackage != nil
+        } else {
+            hasWebsiteProject = false
+        }
     }
 
     /// When the workspace was empty at open time (e.g. just-cloned repo),
