@@ -338,7 +338,7 @@ public struct ThreadDetailView: View {
                     } label: {
                         switch iosAppRunState {
                         case .idle:
-                            Label("Run", systemImage: "play.fill")
+                            Label(hasWebsiteProject ? "Run iOS App" : "Run", systemImage: "play.fill")
                         case .building:
                             Label("Building iPhone app…", systemImage: "hammer")
                         case .running:
@@ -349,7 +349,6 @@ public struct ThreadDetailView: View {
                 }
                 if appRuntime.availability() == .embedded,
                    hasWebsiteProject,
-                   !isIOSAppProject,
                    !currentThread.isArchived {
                     Button {
                         // Website Run — desktop parity: runs the primary project script
@@ -357,7 +356,10 @@ public struct ThreadDetailView: View {
                         // preview in the same way as desktop's ProjectScriptsControl.
                         Task { await runIOSApp() }
                     } label: {
-                        Label("Run", systemImage: "play.fill")
+                        Label(
+                            isIOSAppProject ? "Run Website" : "Run",
+                            systemImage: "play.fill"
+                        )
                     }
                 }
                 Button { toolSurface = .sourceControl } label: {
