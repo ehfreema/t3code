@@ -75,7 +75,7 @@ while IFS= read -r line; do
     *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
   esac
 done <<EOF
-$(find "$ROOT" -maxdepth 4 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -not -path "*/Pods/*" -not -path "*/.t3/*" -not -path "*/node_modules/*" -not -path "*/DerivedData/*" 2>/dev/null | sort)
+$(find "$ROOT" -maxdepth 5 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -not -path "*/Pods/*" -not -path "*/.t3/*" -not -path "*/node_modules/*" -not -path "*/DerivedData/*" 2>/dev/null | sort)
 EOF
 
  TARGET=""
@@ -84,7 +84,10 @@ EOF
  elif [ -n "$PROJ" ]; then
    TARGET="$PROJ"
  else
-   fail "No Xcode project or workspace found in this thread"
+   # Include the searched root in the failure so branch switches are debuggable
+   # and the next Run can be retried without guessing which workspace was used.
+   fail "No Xcode project or workspace found in this thread (searched $ROOT)"
+ fi
  fi
 
  write_status scheme "Reading Xcode schemes"
