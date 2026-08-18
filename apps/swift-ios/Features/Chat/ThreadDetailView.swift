@@ -28,6 +28,7 @@ public struct ThreadDetailView: View {
     @State private var iosAppRunError: String?
     @State private var iosAppBuildPhase: String?
     @State private var iosAppBuildMessage: String?
+    @State private var headerTitle: String = ""
     @FocusState private var composerFocused: Bool
 
     public init(
@@ -87,10 +88,21 @@ public struct ThreadDetailView: View {
             }
         }
         .task(id: thread.id) {
+            if headerTitle.isEmpty {
+                headerTitle = thread.title
+            }
             let restoreBaseline = composerDraft
             let restoreKey = draftKey
             isLoading = true
             _ = await model.detail(for: thread.id, force: true)
+            // Pin the header title to the value at open time. The detail fetch
+            // and subsequent snapshot updates can otherwise flip between the
+            // stale `thread.title` and the fresh `detail.thread.title`, which
+            // is the distracting string flip the user reported.
+            if let fetchedTitle = model.details[thread.id]?.thread.title,
+               !fetchedTitle.isEmpty, headerTitle.isEmpty || headerTitle == thread.title {
+                headerTitle = fetchedTitle
+            }
             // Pre-render every message's markdown off the main thread while the
             // opening state is visible. Cell configuration at mount time then
             // hits the cache instead of parsing synchronously on the main
@@ -217,7 +229,9 @@ public struct ThreadDetailView: View {
 
     private var threadHeaderTitle: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(currentThread.title)
+            Text(headerTitle.isEmpty ? currentThread.title : headerTitle)
+                .contentTransition(.identity)
+                .animation(nil, value: headerTitle)
                 .font(T3Typography.navigationTitle)
                 .foregroundStyle(T3Colors.textPrimary)
                 .lineLimit(1)
