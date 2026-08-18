@@ -264,7 +264,11 @@ const make = Effect.gen(function* () {
         cwd: input.cwd,
         fromCheckpointRef,
         toCheckpointRef: targetCheckpointRef,
-        fallbackFromToHead: false,
+        // A first turn can complete without a turn.started event (for
+        // example after a provider reconnect), so there may be no turn-0
+        // baseline. In that case diff against HEAD instead of making the
+        // successful checkpoint look broken.
+        fallbackFromToHead: !fromCheckpointExists,
         ignoreWhitespace: false,
       })
       .pipe(
