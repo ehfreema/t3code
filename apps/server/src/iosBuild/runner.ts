@@ -62,21 +62,35 @@ write_status locating "Locating Xcode project"
 
 PROJ=""
 WS=""
-while IFS= read -r line; do
-  case "$line" in
+# Fast path: project at workspace root is the common case (Harbour, etc.).
+# Check there first so clean rebuilds don't pay for a full tree walk.
+for d in "$ROOT"/*.xcodeproj "$ROOT"/*.xcworkspace; do
+  [ -e "$d" ] || continue
+  case "$d" in
     *.xcworkspace)
-      # Skip the auto-generated workspace inside a .xcodeproj bundle; it is
-      # not a real workspace and shadows the project itself.
-      case "$line" in
+      case "$d" in
         *.xcodeproj/*) ;;
-        *) if [ -z "$WS" ]; then WS="$line"; fi ;;
+        *) if [ -z "$WS" ]; then WS="$d"; fi ;;
       esac
       ;;
-    *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
+    *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$d"; fi ;;
   esac
-done <<EOF
-$(for d in "$ROOT"/*.xcodeproj "$ROOT"/*.xcworkspace; do [ -e "$d" ] && echo "$d"; done; find "$ROOT" \( -path "$ROOT/.t3" -o -path "*/.git" -o -path "*/Pods" -o -path "*/node_modules" -o -path "*/DerivedData" \) -prune -o \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print 2>/dev/null | sort)
+done
+if [ -z "$PROJ" ] && [ -z "$WS" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *.xcworkspace)
+        case "$line" in
+          *.xcodeproj/*) ;;
+          *) if [ -z "$WS" ]; then WS="$line"; fi ;;
+        esac
+        ;;
+      *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
+    esac
+  done <<EOF
+$(find "$ROOT" \( -path "$ROOT/.t3" -o -path "*/.git" -o -path "*/Pods" -o -path "*/node_modules" -o -path "*/DerivedData" \) -prune -o \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print 2>/dev/null | sort)
 EOF
+fi
 
  TARGET=""
  if [ -n "$WS" ]; then
