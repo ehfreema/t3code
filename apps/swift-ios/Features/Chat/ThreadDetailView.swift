@@ -328,12 +328,6 @@ public struct ThreadDetailView: View {
                 Button { toolSurface = .review } label: {
                     Label("Review changes", systemImage: "doc.text.magnifyingglass")
                 }
-                Button { toolSurface = .sourceControl } label: {
-                    Label("Source Control", systemImage: "arrow.triangle.branch")
-                }
-                Button { toolSurface = .terminal } label: {
-                    Label("Terminal", systemImage: "terminal")
-                }
                 if appRuntime.availability() == .embedded,
                    isIOSAppProject,
                    !currentThread.isArchived {
@@ -350,6 +344,12 @@ public struct ThreadDetailView: View {
                         }
                     }
                     .disabled(iosAppRunState != .idle)
+                }
+                Button { toolSurface = .sourceControl } label: {
+                    Label("Source Control", systemImage: "arrow.triangle.branch")
+                }
+                Button { toolSurface = .terminal } label: {
+                    Label("Terminal", systemImage: "terminal")
                 }
             }
             Section {
