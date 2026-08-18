@@ -91,8 +91,8 @@ EOF
  else
    SCHEMES_JSON=$(xcodebuild -project "$TARGET" -list -json 2>/dev/null) || fail "xcodebuild -list failed"
  fi
-SCHEME=$(python3 - "$SCHEMES_JSON" <<'PY'
-import json, sys
+SCHEME=$(TARGET="$TARGET" python3 - "$SCHEMES_JSON" <<'PY'
+import json, sys, os
 try:
     data = json.loads(sys.argv[1])
     schemes = data["workspace"]["schemes"] if "workspace" in data else data["project"]["schemes"]
@@ -100,11 +100,20 @@ except Exception:
     sys.exit(1)
 if not schemes:
     sys.exit(1)
-# Projects often ship a macOS scheme alongside the iOS one; the iOS build
-# needs the iOS scheme. Prefer a scheme whose name mentions iOS, else the
-# first listed scheme.
+# Prefer the iOS app scheme. Heuristics in order:
+# 1) scheme name mentioning iOS
+# 2) scheme matching the project basename (Harbour.xcodeproj -> Harbour)
+# 3) skip library-like schemes (Common*) when a non-Common alternative exists
+# 4) first scheme
+target_base = os.path.splitext(os.path.basename(os.environ.get("TARGET", "")))[0]
 ios = [s for s in schemes if "ios" in s.lower()]
-print(ios[0] if ios else schemes[0])
+if ios:
+    print(ios[0])
+elif target_base in schemes:
+    print(target_base)
+else:
+    non_common = [s for s in schemes if not s.lower().startswith("common")]
+    print(non_common[0] if non_common else schemes[0])
 PY
 ) || fail "No buildable scheme found"
 
@@ -118,6 +127,7 @@ if [ "$TARGET" = "$WS" ]; then
     -destination 'generic/platform=iOS' \\
     -derivedDataPath "$DD" \\
     -archivePath "$DD/archive.xcarchive" \\
+    -skipPackagePluginValidation \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
     archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
 else
@@ -127,6 +137,7 @@ else
     -destination 'generic/platform=iOS' \\
     -derivedDataPath "$DD" \\
     -archivePath "$DD/archive.xcarchive" \\
+    -skipPackagePluginValidation \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
     archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
 fi
