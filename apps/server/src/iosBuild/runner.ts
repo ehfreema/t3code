@@ -88,7 +88,7 @@ if [ -z "$PROJ" ] && [ -z "$WS" ]; then
       *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
     esac
   done <<EOF
-$(timeout 10 find "$ROOT" \( -path "$ROOT/.t3" -o -path "*/.git" -o -path "*/Pods" -o -path "*/node_modules" -o -path "*/DerivedData" \) -prune -o \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print 2>/dev/null | sort)
+$(perl -e 'alarm 10; exec @ARGV' find "$ROOT" \( -path "$ROOT/.t3" -o -path "*/.git" -o -path "*/Pods" -o -path "*/node_modules" -o -path "*/DerivedData" \) -prune -o \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print 2>/dev/null | sort)
 EOF
 fi
 
