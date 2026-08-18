@@ -419,6 +419,7 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     } else {
         tweakFolder = [docPath stringByAppendingPathComponent:@"Tweaks"];
     }
+    [fm createDirectoryAtPath:tweakFolder withIntermediateDirectories:YES attributes:nil error:nil];
     setenv("LC_GLOBAL_TWEAKS_FOLDER", tweakFolder.UTF8String, 1);
 
     // Update TweakLoader symlink
