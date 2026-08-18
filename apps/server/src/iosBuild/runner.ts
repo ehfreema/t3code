@@ -120,14 +120,25 @@ PY
 write_status building "Building with Xcode (this can take several minutes)"
 # Keep the package cache across builds so private deps like PortainerKit stay
 # resolved. Still deterministic: the build itself is clean, only the
-# SourcePackages are reused.
-if [ -d "$DD/SourcePackages" ]; then
-  mv "$DD/SourcePackages" "$DD/SourcePackages.t3keep" 2>/dev/null || true
-fi
+# SourcePackages and package checkouts are reused.
+for keep in SourcePackages SourcePackages.checkouts; do
+  if [ -d "$DD/$keep" ]; then
+    mv "$DD/$keep" "$DD/$keep.t3keep" 2>/dev/null || true
+  fi
+done
 rm -rf "$DD"
 mkdir -p "$DD"
-if [ -d "$DD/SourcePackages.t3keep" ]; then
-  mv "$DD/SourcePackages.t3keep" "$DD/SourcePackages" 2>/dev/null || true
+for keep in SourcePackages SourcePackages.checkouts; do
+  if [ -d "$DD/$keep.t3keep" ]; then
+    mv "$DD/$keep.t3keep" "$DD/$keep" 2>/dev/null || true
+  fi
+done
+# Resolve packages up front so PortainerKit and similar deps are present
+# before the archive, even in a clean derived data.
+if [ "$TARGET" = "$WS" ]; then
+  xcodebuild -workspace "$TARGET" -scheme "$SCHEME" -resolvePackageDependencies -derivedDataPath "$DD" > /dev/null 2>&1 || true
+else
+  xcodebuild -project "$TARGET" -scheme "$SCHEME" -resolvePackageDependencies -derivedDataPath "$DD" > /dev/null 2>&1 || true
 fi
 
 if [ "$TARGET" = "$WS" ]; then
