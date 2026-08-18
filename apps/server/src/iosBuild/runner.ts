@@ -75,7 +75,7 @@ while IFS= read -r line; do
     *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
   esac
 done <<EOF
-$(find "$ROOT" \( -path "$ROOT/.t3" -o -path "*/.git" -o -path "*/Pods" -o -path "*/node_modules" -o -path "*/DerivedData" \) -prune -o \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print 2>/dev/null | sort)
+$(for d in "$ROOT"/*.xcodeproj "$ROOT"/*.xcworkspace; do [ -e "$d" ] && echo "$d"; done; find "$ROOT" -maxdepth 2 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -not -path "$ROOT/.t3/*" 2>/dev/null | sort)
 EOF
 
  TARGET=""
