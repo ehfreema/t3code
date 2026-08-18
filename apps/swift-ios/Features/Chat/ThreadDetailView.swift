@@ -469,16 +469,21 @@ public struct ThreadDetailView: View {
 
     @MainActor
     private func refreshWebsiteProjectDetection() async {
-        // Website Run is desktop-parity: check independently of iOS, so a
-        // monorepo with both shows two separate Runs.
         guard appRuntime.availability() == .embedded else {
             hasWebsiteProject = false
             return
         }
-        // For now, any project is considered to have a website Run candidate
-        // for parity with desktop's ProjectScripts (which shows Run Dev for
-        // website projects). The server validates on run.
-        hasWebsiteProject = true
+        // Only show website Run if the workspace actually has a website.
+        // Check for package.json (or similar) so pure iOS repos like Harbour
+        // don't get a spurious Run Website button.
+        // Use a lightweight file search similar to the iOS check.
+        if let files = try? await model.client.searchThreadFiles(
+            threadID: thread.id, query: "package.json", limit: 1
+        ), !files.isEmpty {
+            hasWebsiteProject = true
+        } else {
+            hasWebsiteProject = false
+        }
     }
 
     /// When the workspace was empty at open time (e.g. just-cloned repo),
