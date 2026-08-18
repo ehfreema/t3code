@@ -84,9 +84,15 @@ EOF
  elif [ -n "$PROJ" ]; then
    TARGET="$PROJ"
  else
-   # Include the searched root in the failure so branch switches are debuggable
-   # and the next Run can be retried without guessing which workspace was used.
-   fail "No Xcode project or workspace found in this thread (searched $ROOT)"
+   {
+     echo "searched: $ROOT"
+     ls -la "$ROOT" 2>&1 | head -n 20
+     echo "--- find maxdepth 6 raw ---"
+     find "$ROOT" -maxdepth 6 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) 2>&1 | head -n 20
+     echo "--- find maxdepth 6 filtered ---"
+     find "$ROOT" -maxdepth 6 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -not -path "*/Pods/*" -not -path "*/.t3/*" -not -path "*/node_modules/*" -not -path "*/DerivedData/*" 2>&1 | head -n 20
+   } > "$BUILDS/discovery.log" 2>&1 || true
+   fail "No Xcode project or workspace found in this thread (searched $ROOT; see .t3/builds/discovery.log)"
  fi
  fi
 
