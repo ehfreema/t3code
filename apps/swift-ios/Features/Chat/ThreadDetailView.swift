@@ -115,6 +115,9 @@ public struct ThreadDetailView: View {
             // before the timeline mounts so the bar settles during the push
             // transition instead of visibly re-laying-out after it.
             await refreshIOSAppProjectDetection()
+            if !isIOSAppProject {
+                Task { await pollIOSAppProjectUntilFound() }
+            }
             isLoading = false
         }
         .onChange(of: draft) { scheduleDraftSave() }
@@ -434,10 +437,30 @@ public struct ThreadDetailView: View {
             isIOSAppProject = false
             return
         }
-        isIOSAppProject = await FeatureIOSProjectDetector.hasIOSAppBuild(
+        // hasIOSAppBuild is fast (single file read); isIOSAppProject also
+        // searches for a buildable pbxproj so Run appears even before the
+        // first build. Prefer the broader check.
+        if await FeatureIOSProjectDetector.hasIOSAppBuild(client: model.client, threadID: thread.id) {
+            isIOSAppProject = true
+            return
+        }
+        isIOSAppProject = await FeatureIOSProjectDetector.isIOSAppProject(
             client: model.client,
             threadID: thread.id
         )
+    }
+
+    /// When the workspace was empty at open time (e.g. just-cloned repo),
+    /// keep polling until the iOS project appears so Run shows up without a
+    /// manual Reload. Stops as soon as isIOSAppProject becomes true.
+    private func pollIOSAppProjectUntilFound() async {
+        guard appRuntime.availability() == .embedded else { return }
+        for _ in 0..<10 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if isIOSAppProject { return }
+            await refreshIOSAppProjectDetection()
+            if isIOSAppProject { return }
+        }
     }
 
     /// Renders every message's markdown document off the main thread while the
