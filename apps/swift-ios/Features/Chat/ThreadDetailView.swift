@@ -351,9 +351,11 @@ public struct ThreadDetailView: View {
                    hasWebsiteProject,
                    !currentThread.isArchived {
                     Button {
-                        // Website Run — desktop parity: runs the primary project script
-                        // (e.g., `Run Dev` for T3 apps). On mobile site, this starts the
-                        // preview in the same way as desktop's ProjectScriptsControl.
+                        // Website Run — desktop parity placeholder. Full website
+                        // preview via project scripts is not yet wired on mobile;
+                        // keep the entry disabled so it doesn't hit the iOS build
+                        // path and surface “No Xcode project found” for website
+                        // workspaces like base TailscaleGitOps.
                         Task { await runIOSApp() }
                     } label: {
                         Label(
@@ -361,6 +363,7 @@ public struct ThreadDetailView: View {
                             systemImage: "play.fill"
                         )
                     }
+                    .disabled(true)
                 }
                 Button { toolSurface = .sourceControl } label: {
                     Label("Source Control", systemImage: "arrow.triangle.branch")
