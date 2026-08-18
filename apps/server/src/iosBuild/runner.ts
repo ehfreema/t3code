@@ -63,7 +63,6 @@ write_status locating "Locating Xcode project"
 PROJ=""
 WS=""
 # Fast path: project at workspace root is the common case (Harbour, etc.).
-# Check there first so clean rebuilds don't pay for a full tree walk.
 for d in "$ROOT"/*.xcodeproj "$ROOT"/*.xcworkspace; do
   [ -e "$d" ] || continue
   case "$d" in
@@ -77,19 +76,39 @@ for d in "$ROOT"/*.xcodeproj "$ROOT"/*.xcworkspace; do
   esac
 done
 if [ -z "$PROJ" ] && [ -z "$WS" ]; then
-  while IFS= read -r line; do
-    case "$line" in
-      *.xcworkspace)
-        case "$line" in
-          *.xcodeproj/*) ;;
-          *) if [ -z "$WS" ]; then WS="$line"; fi ;;
-        esac
-        ;;
-      *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
-    esac
-  done <<EOF
+  # Worktrees can be at varying depths and may have large Pods trees.
+  # Prefer Git's index (instant, no filesystem walk) and fall back to a
+  # pruned find only when not inside a Git worktree.
+  GIT_CANDIDATES=$(git -C "$ROOT" ls-files --cached --others --exclude-standard 2>/dev/null | grep -E '\.xcodeproj$|\.xcworkspace$' | head -n 20)
+  if [ -n "$GIT_CANDIDATES" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        *.xcworkspace)
+          case "$line" in
+            *.xcodeproj/*) ;;
+            *) if [ -z "$WS" ]; then WS="$ROOT/$line"; fi ;;
+          esac
+          ;;
+        *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$ROOT/$line"; fi ;;
+      esac
+    done <<EOF
+$GIT_CANDIDATES
+EOF
+  else
+    while IFS= read -r line; do
+      case "$line" in
+        *.xcworkspace)
+          case "$line" in
+            *.xcodeproj/*) ;;
+            *) if [ -z "$WS" ]; then WS="$line"; fi ;;
+          esac
+          ;;
+        *.xcodeproj) if [ -z "$PROJ" ]; then PROJ="$line"; fi ;;
+      esac
+    done <<EOF
 $(perl -e 'alarm 10; exec @ARGV' find "$ROOT" \( -path "$ROOT/.t3" -o -path "*/.git" -o -path "*/Pods" -o -path "*/node_modules" -o -path "*/DerivedData" \) -prune -o \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print 2>/dev/null | sort)
 EOF
+  fi
 fi
 
  TARGET=""
