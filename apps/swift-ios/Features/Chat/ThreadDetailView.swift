@@ -469,24 +469,15 @@ public struct ThreadDetailView: View {
 
     @MainActor
     private func refreshWebsiteProjectDetection() async {
-        // Website Run is desktop-parity: show Run for any project that has a
-        // web dev script (package.json with dev, or t3.json). For now, treat
-        // any non-iOS project with a workspace as a potential website — the
-        // server will validate on run. This mirrors desktop's ProjectScripts
-        // control which shows "Run Dev" for website projects.
+        // Website Run is desktop-parity: check independently of iOS, so a
+        // monorepo with both shows two separate Runs.
         guard appRuntime.availability() == .embedded else {
             hasWebsiteProject = false
             return
         }
-        // If it's already an iOS app, don't also show website Run
-        if isIOSAppProject {
-            hasWebsiteProject = false
-            return
-        }
-        // Check for package.json or other website indicators via a lightweight
-        // file existence check. For now, any project that isn't an iOS app but
-        // has a workspace is considered a website candidate for Run parity.
-        // The actual script list will be fetched from the project when needed.
+        // For now, any project is considered to have a website Run candidate
+        // for parity with desktop's ProjectScripts (which shows Run Dev for
+        // website projects). The server validates on run.
         hasWebsiteProject = true
     }
 
