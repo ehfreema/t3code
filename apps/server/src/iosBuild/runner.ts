@@ -158,16 +158,23 @@ fi
 if [ -z "$APP" ]; then
   # No app — if SwiftLint blocked the build, retry without it. This keeps Run
   # holistic: strict lint should not block Run-for-testing. We patch the
-  # project file temporarily to drop the SwiftLint plugin product, build, then
-  # restore. Upstream-safe: only touches the working tree for this build.
+  # project file to drop the entire SwiftLintPlugin package (all blocks that
+  # reference it), build, then restore. Upstream-safe: only touches the
+  # working tree for this build.
   if grep -q "SwiftLint" "$BUILDS/xcodebuild.log" 2>/dev/null; then
     PBX="$TARGET/project.pbxproj"
     if [ -f "$PBX" ]; then
       cp "$PBX" "$PBX.t3bak" 2>/dev/null || true
-      # Remove the SwiftLint plugin productRef lines from the project.
-      # This is the Build Tool Plugin declaration; without it the build
-      # proceeds without SwiftLint.
-      sed -i '' '/SwiftLint/d' "$PBX" 2>/dev/null || sed -i '/SwiftLint/d' "$PBX" 2>/dev/null || true
+      python3 - "$PBX" <<'PYEOF' 2>/dev/null || true
+import re, sys
+pbx_path = sys.argv[1]
+text = open(pbx_path).read()
+# Remove the XCRemoteSwiftPackageReference block for SwiftLintPlugin (5-6 lines)
+text = re.sub(r'[0-9A-F]{24} /\* XCRemoteSwiftPackageReference "SwiftLintPlugin" \*/ = \{[^}]*\};\n', '', text)
+# Remove any remaining SwiftLint product lines (productRef, package product)
+text = re.sub(r'[^\n]*SwiftLint[^\n]*\n', '', text)
+open(pbx_path, 'w').write(text)
+PYEOF
       if [ "$TARGET" = "$WS" ]; then
         xcodebuild -workspace "$TARGET" -scheme "$SCHEME" \\
           -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \\
