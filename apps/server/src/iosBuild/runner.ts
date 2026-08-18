@@ -118,27 +118,32 @@ PY
 ) || fail "No buildable scheme found"
 
 write_status building "Building with Xcode (this can take several minutes)"
-# Keep the package cache across builds so private deps like PortainerKit stay
-# resolved. Still deterministic: the build itself is clean, only the
-# SourcePackages and package checkouts are reused.
-for keep in SourcePackages SourcePackages.checkouts; do
-  if [ -d "$DD/$keep" ]; then
-    mv "$DD/$keep" "$DD/$keep.t3keep" 2>/dev/null || true
-  fi
-done
+write_status dependencies "Initializing dependencies"
+# Submodules commonly contain local Swift packages. Initialize them before
+# asking Xcode to resolve the package graph; otherwise Xcode reports a
+# misleading missing-product error for an empty submodule directory. A
+# non-Git workspace simply has no submodules to initialize.
+if git -C "$ROOT" rev-parse --show-toplevel > /dev/null 2>&1; then
+  git -C "$ROOT" submodule update --init --recursive > "$BUILDS/submodules.log" 2>&1 || fail "Git submodule initialization failed (see .t3/builds/submodules.log)"
+fi
+
+# Derived data is disposable, but resolved package checkouts are reusable.
+# Keep them in their own .t3 cache and pass that path to every Xcode command.
+PACKAGE_DIR="$BUILDS/source-packages"
 rm -rf "$DD"
-mkdir -p "$DD"
-for keep in SourcePackages SourcePackages.checkouts; do
-  if [ -d "$DD/$keep.t3keep" ]; then
-    mv "$DD/$keep.t3keep" "$DD/$keep" 2>/dev/null || true
-  fi
-done
-# Resolve packages up front so PortainerKit and similar deps are present
-# before the archive, even in a clean derived data.
+mkdir -p "$DD" "$PACKAGE_DIR"
+
+write_status dependencies "Resolving Swift packages"
 if [ "$TARGET" = "$WS" ]; then
-  xcodebuild -workspace "$TARGET" -scheme "$SCHEME" -resolvePackageDependencies -derivedDataPath "$DD" > /dev/null 2>&1 || true
+  xcodebuild -workspace "$TARGET" -scheme "$SCHEME" \\
+    -resolvePackageDependencies \\
+    -clonedSourcePackagesDirPath "$PACKAGE_DIR" \\
+    -derivedDataPath "$DD" > "$BUILDS/packages.log" 2>&1 || fail "Swift package resolution failed (see .t3/builds/packages.log)"
 else
-  xcodebuild -project "$TARGET" -scheme "$SCHEME" -resolvePackageDependencies -derivedDataPath "$DD" > /dev/null 2>&1 || true
+  xcodebuild -project "$TARGET" -scheme "$SCHEME" \\
+    -resolvePackageDependencies \\
+    -clonedSourcePackagesDirPath "$PACKAGE_DIR" \\
+    -derivedDataPath "$DD" > "$BUILDS/packages.log" 2>&1 || fail "Swift package resolution failed (see .t3/builds/packages.log)"
 fi
 
 if [ "$TARGET" = "$WS" ]; then
@@ -147,6 +152,7 @@ if [ "$TARGET" = "$WS" ]; then
     -sdk iphoneos \\
     -destination 'generic/platform=iOS' \\
     -derivedDataPath "$DD" \\
+    -clonedSourcePackagesDirPath "$PACKAGE_DIR" \\
     -archivePath "$DD/archive.xcarchive" \\
     -skipPackagePluginValidation \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
@@ -157,77 +163,22 @@ else
     -sdk iphoneos \\
     -destination 'generic/platform=iOS' \\
     -derivedDataPath "$DD" \\
+    -clonedSourcePackagesDirPath "$PACKAGE_DIR" \\
     -archivePath "$DD/archive.xcarchive" \\
     -skipPackagePluginValidation \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
     archive > "$BUILDS/xcodebuild.log" 2>&1 || true
 fi
 
-# Holistic: for Run-for-testing, the IPA should still be produced even if a
-# strict lint plugin (SwiftLint) fails the build. The app binary is already
-# built at that point; package it if it exists.
-APP=$(find "$DD/archive.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
+# A build plugin may return failure after Xcode has produced a valid app. The
+# archive is usable for Run-for-testing in that case, so inspect its products
+# instead of treating the process exit code as the only signal.
+APP=$(find "$DD/archive.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" 2>/dev/null | sort | head -n 1)
 if [ -z "$APP" ]; then
-  APP=$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
+  APP=$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | sort | head -n 1)
 fi
 if [ -z "$APP" ]; then
-  APP=$(find "$DD/Build/Intermediates.noindex/ArchiveIntermediates" -maxdepth 5 -name "*.app" 2>/dev/null | head -n 1)
-fi
-if [ -z "$APP" ]; then
-  APP=$(find "$DD" -maxdepth 8 -name "*.app" -not -path "*/Intermediates*" 2>/dev/null | head -n 1)
-fi
-if [ -z "$APP" ]; then
-  # No app — if SwiftLint blocked the build, retry without it. This keeps Run
-  # holistic: strict lint should not block Run-for-testing. We patch the
-  # project file to drop the entire SwiftLintPlugin package (all blocks that
-  # reference it), build, then restore. Upstream-safe: only touches the
-  # working tree for this build.
-  if grep -q "SwiftLint" "$BUILDS/xcodebuild.log" 2>/dev/null; then
-    PBX="$TARGET/project.pbxproj"
-    if [ -f "$PBX" ]; then
-      cp "$PBX" "$PBX.t3bak" 2>/dev/null || true
-      # Remove the entire SwiftLintPlugin package and all its products.
-      # This is the Build Tool Plugin that fails the build when strict.
-      # Use Python to handle the multi-line block correctly.
-      SWIFT_LINT=NO python3 - "$PBX" <<'PYEOF' 2>/dev/null || true
-import re, sys
-pbx_path = sys.argv[1]
-text = open(pbx_path).read()
-# Remove the XCRemoteSwiftPackageReference block for SwiftLintPlugin
-text = re.sub(r'[0-9A-F]{24} /\* XCRemoteSwiftPackageReference "SwiftLintPlugin" \*/ = \{[^}]*\};\n', '', text, flags=re.DOTALL)
-# Remove the package product blocks for SwiftLint
-text = re.sub(r'[0-9A-F]{24} /\* SwiftLint \*/ = \{[^}]*\};\n', '', text, flags=re.DOTALL)
-# Remove any remaining SwiftLint references (productRef lines, etc.)
-text = re.sub(r'[^\n]*SwiftLint[^\n]*\n', '', text)
-# Also remove the SwiftLint package from the packages array if present
-text = re.sub(r',\n\s*[0-9A-F]{24} /\* XCRemoteSwiftPackageReference "SwiftLintPlugin" \*/,', '', text)
-open(pbx_path, 'w').write(text)
-PYEOF
-      if [ "$TARGET" = "$WS" ]; then
-        SWIFT_LINT=NO xcodebuild -workspace "$TARGET" -scheme "$SCHEME" \\
-          -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \\
-          -derivedDataPath "$DD" -archivePath "$DD/archive.xcarchive" \\
-          -skipPackagePluginValidation \\
-          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
-          archive > "$BUILDS/xcodebuild.log" 2>&1 || true
-      else
-        SWIFT_LINT=NO xcodebuild -project "$TARGET" -scheme "$SCHEME" \\
-          -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \\
-          -derivedDataPath "$DD" -archivePath "$DD/archive.xcarchive" \\
-          -skipPackagePluginValidation \\
-          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
-          archive > "$BUILDS/xcodebuild.log" 2>&1 || true
-      fi
-      mv "$PBX.t3bak" "$PBX" 2>/dev/null || true
-      APP=$(find "$DD/archive.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
-      if [ -z "$APP" ]; then
-        APP=$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
-      fi
-      if [ -z "$APP" ]; then
-        APP=$(find "$DD/Build/Intermediates.noindex/ArchiveIntermediates" -maxdepth 5 -name "*.app" 2>/dev/null | head -n 1)
-      fi
-    fi
-  fi
+  APP=$(find "$DD/Build/Intermediates.noindex/ArchiveIntermediates" -maxdepth 8 -name "*.app" 2>/dev/null | sort | head -n 1)
 fi
 if [ -z "$APP" ]; then
   # Still no app — surface the real xcodebuild failure.
