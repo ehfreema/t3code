@@ -118,7 +118,17 @@ PY
 ) || fail "No buildable scheme found"
 
 write_status building "Building with Xcode (this can take several minutes)"
+# Keep the package cache across builds so private deps like PortainerKit stay
+# resolved. Still deterministic: the build itself is clean, only the
+# SourcePackages are reused.
+if [ -d "$DD/SourcePackages" ]; then
+  mv "$DD/SourcePackages" "$DD/SourcePackages.t3keep" 2>/dev/null || true
+fi
 rm -rf "$DD"
+mkdir -p "$DD"
+if [ -d "$DD/SourcePackages.t3keep" ]; then
+  mv "$DD/SourcePackages.t3keep" "$DD/SourcePackages" 2>/dev/null || true
+fi
 
 if [ "$TARGET" = "$WS" ]; then
   xcodebuild -workspace "$TARGET" -scheme "$SCHEME" \\
