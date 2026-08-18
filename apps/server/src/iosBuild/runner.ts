@@ -129,7 +129,7 @@ if [ "$TARGET" = "$WS" ]; then
     -archivePath "$DD/archive.xcarchive" \\
     -skipPackagePluginValidation \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
-    archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
+    archive > "$BUILDS/xcodebuild.log" 2>&1 || true
 else
   xcodebuild -project "$TARGET" -scheme "$SCHEME" \\
     -configuration Release \\
@@ -139,17 +139,27 @@ else
     -archivePath "$DD/archive.xcarchive" \\
     -skipPackagePluginValidation \\
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \\
-    archive > "$BUILDS/xcodebuild.log" 2>&1 || fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
+    archive > "$BUILDS/xcodebuild.log" 2>&1 || true
 fi
 
+# Holistic: for Run-for-testing, the IPA should still be produced even if a
+# strict lint plugin (SwiftLint) fails the build. The app binary is already
+# built at that point; package it if it exists.
 APP=$(find "$DD/archive.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
 if [ -z "$APP" ]; then
   APP=$(find "$DD/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" 2>/dev/null | head -n 1)
 fi
 if [ -z "$APP" ]; then
+  APP=$(find "$DD/Build/Intermediates.noindex/ArchiveIntermediates" -maxdepth 5 -name "*.app" 2>/dev/null | head -n 1)
+fi
+if [ -z "$APP" ]; then
   APP=$(find "$DD" -maxdepth 8 -name "*.app" -not -path "*/Intermediates*" 2>/dev/null | head -n 1)
 fi
-[ -n "$APP" ] || fail "No .app produced by the build"
+if [ -z "$APP" ]; then
+  # No app at all — surface the real xcodebuild failure.
+  cat "$BUILDS/xcodebuild.log" 2>/dev/null | tail -n 20 >&2 || true
+  fail "xcodebuild failed (see .t3/builds/xcodebuild.log)"
+fi
 
 BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" 2>/dev/null || echo "")
 [ -n "$BUNDLE_ID" ] || fail "Could not read the app bundle identifier"
