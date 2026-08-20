@@ -14,16 +14,6 @@ struct ConnectionDetailsTests {
     }
 
     @Test
-    func parsesUniqueFallbackEndpoints() throws {
-        let details = try ConnectionDetailsParser.parse(
-            "http://192.168.1.47:3773/pair?fallback=http%3A%2F%2F100.81.12.71%3A3773&fallback=http%3A%2F%2F100.81.12.71%3A3773#token=PAIRCODE"
-        )
-
-        #expect(details.endpoint == "http://192.168.1.47:3773")
-        #expect(details.fallbackEndpoints == ["http://100.81.12.71:3773"])
-    }
-
-    @Test
     func parsesHostedPairingURL() throws {
         let details = try ConnectionDetailsParser.parse(
             "https://app.t3.codes/pair?host=https%3A%2F%2Fdesktop.tailnet.ts.net%2F#token=PAIRCODE"
@@ -119,7 +109,6 @@ struct LocalEndpointDetectionTests {
         "10.20.30.40",
         "172.20.10.2",
         "192.168.213.171",
-        "100.81.12.71",
         "[::1]",
         "::1",
         "[fe80::aede:48ff:fe00:1122]:3773",

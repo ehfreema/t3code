@@ -5,6 +5,52 @@ import Testing
 @Suite("Usage reporting")
 struct UsageModelsTests {
     @Test
+    func pastDayRequestsTwentyFourMinuteAlignedHourlyBuckets() throws {
+        let timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let now = try #require(
+            ISO8601DateFormatter().date(from: "2026-08-18T12:34:56Z")
+        )
+
+        let input = UsageWindow.make(days: 1, now: now, timeZone: timeZone)
+        let since = try #require(input.sinceTime)
+        let until = try #require(input.untilTime)
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let sinceDate = try #require(parser.date(from: since))
+        let untilDate = try #require(parser.date(from: until))
+
+        #expect(input.resolution == .hour)
+        #expect(untilDate.timeIntervalSince(sinceDate) == 24 * 60 * 60)
+        #expect(Calendar.current.component(.second, from: untilDate) == 0)
+        #expect(UsageWindow.hours(in: input).count == 24)
+    }
+
+    @Test
+    func hourlyBucketsMergeAcrossEnvironmentsAndProviders() {
+        let hour = "2026-08-18T12:00:00.000Z"
+        let first = FeatureEnvironmentUsage(
+            environmentID: "a",
+            label: "First",
+            summary: summary(provider: .codex, costUsd: 2, hourStart: hour),
+            errorMessage: nil
+        )
+        let second = FeatureEnvironmentUsage(
+            environmentID: "b",
+            label: "Second",
+            summary: summary(provider: .claude, costUsd: 3, hourStart: hour),
+            errorMessage: nil
+        )
+
+        let merged = UsageMerger.merge([first, second])
+
+        #expect(merged.hourly.count == 1)
+        #expect(merged.hourly[0].hourStart == hour)
+        #expect(merged.hourly[0].costUsd == 5)
+        #expect(merged.hourly[0].byProvider[.codex]?.costUsd == 2)
+        #expect(merged.hourly[0].byProvider[.claude]?.costUsd == 3)
+    }
+
+    @Test
     func mergeDoesNotCountReasoningTokensTwice() {
         let report = FeatureEnvironmentUsage(
             environmentID: "environment-a",
@@ -313,6 +359,55 @@ struct UsageModelsTests {
         #expect(state.errorMessage == nil)
     }
 
+    @Test
+    func rollingServerVersionsLoadWhenAnotherEnvironmentIsOffline() throws {
+        let timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let now = try #require(
+            ISO8601DateFormatter().date(from: "2026-08-18T12:00:00Z")
+        )
+        var state = UsageLoadState(days: 30, now: now, timeZone: timeZone)
+        let request = state.begin(days: 30, now: now, timeZone: timeZone)
+        let currentServer = FeatureEnvironmentUsage(
+            environmentID: "current-server",
+            label: "Current server",
+            summary: summary(
+                contractVersion: usageContractVersion,
+                provider: .codex,
+                costUsd: 10
+            ),
+            errorMessage: nil
+        )
+        let previousServer = FeatureEnvironmentUsage(
+            environmentID: "previous-server",
+            label: "Previous server",
+            summary: summary(
+                contractVersion: minimumCompatibleUsageContractVersion,
+                provider: .claude,
+                costUsd: 20
+            ),
+            errorMessage: nil
+        )
+        let offlineServer = FeatureEnvironmentUsage(
+            environmentID: "offline-server",
+            label: "Offline server",
+            summary: nil,
+            errorMessage: "This environment could not report usage."
+        )
+
+        let received = state.receive(
+            [currentServer, previousServer, offlineServer],
+            for: request
+        )
+        #expect(received)
+
+        #expect(state.merged.costUsd == 30)
+        #expect(
+            state.merged.contributingEnvironments == ["current-server", "previous-server"]
+        )
+        #expect(state.merged.staleEnvironments.isEmpty)
+        #expect(state.environments.filter { $0.errorMessage != nil } == [offlineServer])
+    }
+
     private func summary(
         contractVersion: Int = usageContractVersion,
         provider: UsageProviderKind,
@@ -322,7 +417,8 @@ struct UsageModelsTests {
         cacheCreation: Int = 0,
         output: Int = 20,
         reasoning: Int = 0,
-        sourceStatus: UsageSourceStatus = .ok
+        sourceStatus: UsageSourceStatus = .ok,
+        hourStart: String? = nil
     ) -> UsageSummary {
         let path = provider == .codex ? "/Users/theo/.codex" : "/Users/theo/.claude"
         return UsageSummary(
@@ -334,6 +430,7 @@ struct UsageModelsTests {
             buckets: [
                 UsageBucket(
                     day: "2026-08-09",
+                    hourStart: hourStart,
                     provider: provider,
                     model: provider == .codex ? "gpt-5.6-sol" : "claude-opus-4-1",
                     totals: UsageTokenTotals(

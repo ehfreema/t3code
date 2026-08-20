@@ -70,7 +70,6 @@ public struct UploadChatImageAttachment: Codable, Equatable, Sendable {
 
 public enum AssetResource: Equatable, Sendable {
     case workspaceFile(threadID: String, path: String)
-    case iosAppArtifact(threadID: String, path: String)
     case attachment(id: String)
     case projectFavicon(cwd: String)
 
@@ -79,12 +78,6 @@ public enum AssetResource: Equatable, Sendable {
         case let .workspaceFile(threadID, path):
             .object([
                 "_tag": .string("workspace-file"),
-                "threadId": .string(threadID),
-                "path": .string(path),
-            ])
-        case let .iosAppArtifact(threadID, path):
-            .object([
-                "_tag": .string("ios-app-artifact"),
                 "threadId": .string(threadID),
                 "path": .string(path),
             ])

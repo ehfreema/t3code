@@ -57,7 +57,7 @@ struct ProviderIcon: View {
                 providerID: providerID,
                 providerName: fallbackName
             ) {
-                Image(brand.rawValue, bundle: T3ResourceBundle.value)
+                Image(brand.rawValue)
                     .resizable()
                     .renderingMode(brand.usesTemplateRendering ? .template : .original)
                     .foregroundStyle(T3Colors.textSecondary)
@@ -82,10 +82,4 @@ struct ProviderIcon: View {
             .first
             .map { String($0).uppercased() } ?? "?"
     }
-}
-
-private final class T3ResourceBundleToken {}
-
-enum T3ResourceBundle {
-    static let value = Bundle(for: T3ResourceBundleToken.self)
 }

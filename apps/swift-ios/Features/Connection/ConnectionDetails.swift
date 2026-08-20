@@ -3,7 +3,6 @@ import Foundation
 struct ConnectionDetails: Equatable, Sendable {
     var endpoint: String
     var pairingCode: String?
-    var fallbackEndpoints: [String] = []
 }
 
 enum ConnectionDetailsError: LocalizedError, Equatable {
@@ -35,7 +34,6 @@ enum ConnectionDetailsParser {
     ]
     private static let endpointNames = ["host", "endpoint", "server", "url"]
     private static let wrappedPairingURLNames = ["pairingUrl", "pairing_url"]
-    private static let fallbackEndpointNames = ["fallback", "fallback_endpoint"]
 
     static func parse(_ input: String) throws -> ConnectionDetails {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -59,8 +57,7 @@ enum ConnectionDetailsParser {
         let code = pieces.dropFirst().first(where: { !$0.isEmpty })
         return ConnectionDetails(
             endpoint: try normalizedEndpoint(address),
-            pairingCode: normalizedCode(code),
-            fallbackEndpoints: []
+            pairingCode: normalizedCode(code)
         )
     }
 
@@ -127,23 +124,14 @@ enum ConnectionDetailsParser {
                 if wrapped.pairingCode == nil {
                     wrapped.pairingCode = normalizedCode(token)
                 }
-                wrapped.fallbackEndpoints = mergedFallbackEndpoints(
-                    primary: wrapped.endpoint,
-                    values: wrapped.fallbackEndpoints + fallbackEndpoints(in: allItems)
-                )
                 return wrapped
             }
             guard let target = firstValue(named: endpointNames, in: allItems) else {
                 throw ConnectionDetailsError.invalidAddress
             }
-            let endpoint = try normalizedEndpoint(target)
             return ConnectionDetails(
-                endpoint: endpoint,
-                pairingCode: normalizedCode(token),
-                fallbackEndpoints: mergedFallbackEndpoints(
-                    primary: endpoint,
-                    values: fallbackEndpoints(in: allItems)
-                )
+                endpoint: try normalizedEndpoint(target),
+                pairingCode: normalizedCode(token)
             )
         }
 
@@ -152,14 +140,9 @@ enum ConnectionDetailsParser {
         }
 
         let advertisedHost = firstValue(named: endpointNames, in: queryItems)
-        let endpoint = try normalizedEndpoint(advertisedHost ?? input)
         return ConnectionDetails(
-            endpoint: endpoint,
-            pairingCode: normalizedCode(token),
-            fallbackEndpoints: mergedFallbackEndpoints(
-                primary: endpoint,
-                values: fallbackEndpoints(in: allItems)
-            )
+            endpoint: try normalizedEndpoint(advertisedHost ?? input),
+            pairingCode: normalizedCode(token)
         )
     }
 
@@ -172,23 +155,6 @@ enum ConnectionDetailsParser {
     private static func normalizedCode(_ input: String?) -> String? {
         let value = input?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? nil : value
-    }
-
-    private static func fallbackEndpoints(in items: [URLQueryItem]) -> [String] {
-        items.compactMap { item in
-            guard fallbackEndpointNames.contains(where: {
-                $0.caseInsensitiveCompare(item.name) == .orderedSame
-            }), let value = item.value else { return nil }
-            return try? normalizedEndpoint(value)
-        }
-    }
-
-    private static func mergedFallbackEndpoints(
-        primary: String,
-        values: [String]
-    ) -> [String] {
-        var seen = Set([primary])
-        return values.filter { seen.insert($0).inserted }
     }
 
     private static func firstURL(in input: String) -> String? {
@@ -260,7 +226,6 @@ enum EndpointNetworkScope {
         if octets.count == 4, octets.allSatisfy({ 0 ... 255 ~= $0 }) {
             return octets[0] == 10
                 || octets[0] == 127
-                || (octets[0] == 100 && 64 ... 127 ~= octets[1])
                 || (octets[0] == 169 && octets[1] == 254)
                 || (octets[0] == 172 && 16 ... 31 ~= octets[1])
                 || (octets[0] == 192 && octets[1] == 168)

@@ -26,6 +26,16 @@ struct PlatformRootView: View {
                 navigationRequest = nil
             }
         )
+        .environment(\.openURL, OpenURLAction { url in
+            // Links tapped inside the app (message Markdown above all) would
+            // otherwise leave for Safari or be rejected by an unregistered
+            // scheme, so keep the ones this device can already show.
+            guard let route = PlatformInAppLinkRouter.route(for: url, in: model.snapshot) else {
+                return .systemAction
+            }
+            handle(route)
+            return .handled
+        })
         .onOpenURL { url in
             handle(url: url, letOnboardingConfirmConnection: true)
         }
@@ -123,12 +133,6 @@ struct PlatformRootView: View {
     }
 
     private func handle(url: URL, letOnboardingConfirmConnection: Bool) {
-        // Runtime-internal URLs are owned by the LiveContainer overlay that hosts this
-        // UI. They are not platform routes and must not surface link errors.
-        if let scheme = url.scheme?.lowercased(),
-           ["t3code-livecontainer", "livecontainer", "livecontainer2", "livecontainer3", "liveprocess"].contains(scheme) {
-            return
-        }
         do {
             let route = try PlatformDeepLinkParser.parse(url)
             if case .connection = route,

@@ -544,15 +544,15 @@ private struct T3ConnectAuthProviderIcon: View {
                 .scaledToFit()
                 .foregroundStyle(T3Colors.textPrimary)
         case .github:
-            Image("AuthGitHub", bundle: T3ResourceBundle.value)
+            Image("AuthGitHub")
                 .resizable()
                 .scaledToFit()
         case .google:
-            Image("AuthGoogle", bundle: T3ResourceBundle.value)
+            Image("AuthGoogle")
                 .resizable()
                 .scaledToFit()
         case .microsoft:
-            Image("AuthMicrosoft", bundle: T3ResourceBundle.value)
+            Image("AuthMicrosoft")
                 .resizable()
                 .scaledToFit()
         default:

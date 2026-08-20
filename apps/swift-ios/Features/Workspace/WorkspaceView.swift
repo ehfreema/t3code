@@ -19,7 +19,6 @@ struct FeatureWorkspaceNavigationRequest: Equatable, Sendable {
 
 public struct WorkspaceView: View {
     @SwiftUI.Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @SwiftUI.Environment(\.t3CodeEmbedded) private var t3CodeEmbedded
 
     @Bindable var model: FeatureRootModel
     private let navigationRequest: FeatureWorkspaceNavigationRequest?
@@ -240,6 +239,9 @@ public struct WorkspaceView: View {
                 onRename: { thread in
                     renameTitle = thread.title
                     renamingThread = thread
+                },
+                onRegenerateTitle: { thread in
+                    Task { await model.regenerateThreadTitle(thread.id) }
                 },
                 onArchive: { thread, archived in
                     Task { await model.setArchived(thread.id, archived: archived) }
@@ -769,6 +771,13 @@ struct HomeThreadRowContext: Equatable {
         let projectByID = snapshot.projects.reduce(into: [String: FeatureProject]()) {
             $0[$1.id] = $1
         }
+        let projectGroupNameByID = DailyUXCreationContext.projectGroups(in: snapshot).reduce(
+            into: [String: String]()
+        ) { result, group in
+            for projectID in group.memberProjectIDs {
+                result[projectID] = group.name
+            }
+        }
         let environmentByID = snapshot.environments.reduce(into: [String: FeatureEnvironment]()) {
             $0[$1.id] = $1
         }
@@ -797,7 +806,7 @@ struct HomeThreadRowContext: Equatable {
                 : environment?.connectionState
 
             result[thread.id] = HomeThreadRowContext(
-                projectName: project?.name ?? "Project",
+                projectName: projectGroupNameByID[thread.projectID] ?? project?.name ?? "Project",
                 projectEnvironmentID: project?.environmentID,
                 projectWorkspaceRoot: project?.path,
                 environmentLabel: environmentLabel?.isEmpty == false ? environmentLabel : nil,
