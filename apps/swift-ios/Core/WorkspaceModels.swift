@@ -573,3 +573,25 @@ public struct TerminalMetadataEvent: Codable, Equatable, Sendable {
     public let threadId: String?
     public let terminalId: String?
 }
+
+// MARK: - Browser local servers
+
+public struct DiscoveredLocalServerTerminal: Codable, Equatable, Sendable {
+    public let threadId: String
+    public let terminalId: String
+}
+
+public struct DiscoveredLocalServer: Codable, Equatable, Sendable {
+    public let host: String
+    public let port: Int
+    public let url: String
+    public let processName: String?
+    public let pid: Int?
+    public let terminal: DiscoveredLocalServerTerminal?
+}
+
+public struct DiscoveredLocalServerList: Codable, Equatable, Sendable {
+    public let servers: [DiscoveredLocalServer]
+    public let scannedAt: String
+    public let configuredUrlProbing: Bool?
+}

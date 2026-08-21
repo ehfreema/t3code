@@ -2373,6 +2373,54 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             )
     }
 
+    func discoveredLocalServers(
+        threadID: String,
+        configuredURLs: [String]
+    ) -> AsyncStream<[FeatureLocalServer]> {
+        guard let route = try? threadRoute(for: threadID) else {
+            return AsyncStream { $0.finish() }
+        }
+        let client = route.client
+        let environmentID = route.environmentID
+        let generation = environmentGeneration
+        return AsyncStream { continuation in
+            let task = Task { [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
+                }
+                do {
+                    for try await list in await client.discoveredLocalServers(
+                        configuredURLs: configuredURLs
+                    ) {
+                        guard !Task.isCancelled,
+                              self.isKnownClient(
+                                  client,
+                                  environmentID: environmentID,
+                                  generation: generation
+                              ) else { break }
+                        continuation.yield(list.servers.map {
+                            FeatureLocalServer(
+                                host: $0.host,
+                                port: $0.port,
+                                url: $0.url,
+                                processName: $0.processName,
+                                pid: $0.pid,
+                                terminalID: $0.terminal?.terminalId
+                            )
+                        })
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish()
+                }
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
+
     private func requireClient() throws -> T3Client {
         guard let client else { throw NativeFeatureClientError.notConnected }
         return client

@@ -187,6 +187,10 @@ public protocol FeatureClient: AnyObject {
     ) async throws
     func clearTerminal(threadID: String, terminalID: String) async throws
     func closeTerminal(threadID: String, terminalID: String) async throws
+    func discoveredLocalServers(
+        threadID: String,
+        configuredURLs: [String]
+    ) -> AsyncStream<[FeatureLocalServer]>
 }
 
 public extension FeatureClient {
@@ -200,6 +204,13 @@ public extension FeatureClient {
 
     func startIOSBuild(threadID _: String, workspaceRoot _: String) async throws {
         throw FeatureCapabilityUnavailable("iPhone builds")
+    }
+
+    func discoveredLocalServers(
+        threadID _: String,
+        configuredURLs _: [String]
+    ) -> AsyncStream<[FeatureLocalServer]> {
+        AsyncStream { $0.finish() }
     }
 
     func loadEarlierThreadTurns(id _: String) async throws -> FeatureThreadDetail? {

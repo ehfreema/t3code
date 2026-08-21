@@ -12,6 +12,32 @@ public struct FeatureCapabilityUnavailable: LocalizedError, Sendable, Equatable 
     }
 }
 
+public struct FeatureLocalServer: Identifiable, Equatable, Sendable {
+    public var id: String { "\(host):\(port)" }
+    public let host: String
+    public let port: Int
+    public let url: String
+    public let processName: String?
+    public let pid: Int?
+    public let terminalID: String?
+
+    public init(
+        host: String,
+        port: Int,
+        url: String,
+        processName: String?,
+        pid: Int?,
+        terminalID: String?
+    ) {
+        self.host = host
+        self.port = port
+        self.url = url
+        self.processName = processName
+        self.pid = pid
+        self.terminalID = terminalID
+    }
+}
+
 /// Optional rich-file capability. The base file contract is deliberately text-only,
 /// while native clients can resolve the existing signed workspace asset route for images.
 @MainActor

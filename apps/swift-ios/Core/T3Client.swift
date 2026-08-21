@@ -1023,6 +1023,19 @@ public actor T3Client {
         )
     }
 
+    public func discoveredLocalServers(
+        configuredURLs: [String] = []
+    ) async -> AsyncThrowingStream<DiscoveredLocalServerList, Error> {
+        let payload: JSONValue = configuredURLs.isEmpty
+            ? .object([:])
+            : .object(["configuredUrls": .array(configuredURLs.map(JSONValue.string))])
+        return await rpc.subscribe(
+            RPCMethod.subscribeDiscoveredLocalServers.rawValue,
+            payload: payload,
+            as: DiscoveredLocalServerList.self
+        )
+    }
+
     public func writeTerminal(
         threadID: String,
         terminalID: String,
@@ -1488,6 +1501,7 @@ public enum RPCMethod: String, Sendable {
     case terminalClose = "terminal.close"
     case subscribeTerminalEvents
     case subscribeTerminalMetadata
+    case subscribeDiscoveredLocalServers
 }
 
 public enum OrchestrationCommands {

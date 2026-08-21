@@ -340,7 +340,8 @@ python3 - \
     "$T3_LIVE_URL_SCHEME" \
     "$T3_LIVE_MARKETING_VERSION" \
     "$T3_LIVE_BUILD_NUMBER" \
-    "$T3_LIVE_DISPLAY_NAME" <<'PY'
+    "$T3_LIVE_DISPLAY_NAME" \
+    "$T3_SWIFT_APP_ICON_NAME" <<'PY'
 import os
 import plistlib
 from pathlib import Path
@@ -352,12 +353,14 @@ url_scheme = sys.argv[3]
 marketing_version = sys.argv[4]
 build_number = sys.argv[5]
 display_name = sys.argv[6]
+icon_name = sys.argv[7]
 with path.open("rb") as stream:
     info = plistlib.load(stream)
 
 info["CFBundleDisplayName"] = display_name
 info["CFBundleName"] = "T3CodeLive"
 info["CFBundleIdentifier"] = bundle_identifier
+info["CFBundleIconName"] = icon_name
 info["CFBundleShortVersionString"] = marketing_version
 info["CFBundleVersion"] = build_number
 info.pop("CFBundleIconUsesAutomaticDarkModeVariant", None)

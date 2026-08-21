@@ -31,6 +31,8 @@ public struct ThreadDetailView: View {
     @State private var isIOSAppProject = false
     @State private var websiteRunConfiguration: FeatureWebsiteRunConfiguration?
     @State private var runProgressPresented = false
+    @State private var browserPresented = false
+    @State private var browserInitialURL: URL?
 
     public init(
         model: FeatureRootModel,
@@ -143,6 +145,14 @@ public struct ThreadDetailView: View {
             )
             .presentationDetents([.height(300)])
             .presentationDragIndicator(.visible)
+            .presentationBackground(T3Colors.background)
+        }
+        .sheet(isPresented: $browserPresented) {
+            FeatureBrowserView(
+                client: model.client,
+                threadID: thread.id,
+                initialURL: browserInitialURL
+            )
         }
         .background {
             ThreadBackSwipeGestureView(
@@ -286,6 +296,9 @@ public struct ThreadDetailView: View {
                 }
             }
             Section("Workspace") {
+                Button { browserPresented = true } label: {
+                    Label("Browser", systemImage: "safari")
+                }
                 Button { toolSurface = .files } label: {
                     Label("Files", systemImage: "folder")
                 }
@@ -785,7 +798,8 @@ public struct ThreadDetailView: View {
                 terminalID: terminalID,
                 exitMarker: exitMarker
             )
-            openURL(previewURL)
+            browserInitialURL = previewURL
+            browserPresented = true
             completeRun()
         } catch {
             failRun(.website, message: error.localizedDescription)
@@ -857,11 +871,61 @@ public struct ThreadDetailView: View {
     nonisolated private static func terminalFailureDetail(
         _ terminal: FeatureTerminalSnapshot
     ) -> String {
-        let detail = terminal.error ?? terminal.buffer
-            .split(separator: "\n")
+        let source = terminal.error ?? terminal.buffer
+        let cleaned = stripTerminalControlSequences(source)
+        return cleaned
+            .split(whereSeparator: \.isNewline)
             .suffix(4)
             .joined(separator: "\n")
-        return detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func stripTerminalControlSequences(_ text: String) -> String {
+        let scalars = text.unicodeScalars
+        var result = String.UnicodeScalarView()
+        var index = scalars.startIndex
+
+        while index < scalars.endIndex {
+            let value = scalars[index].value
+            index = scalars.index(after: index)
+
+            guard value == 0x1B else {
+                if value == 0x7F || (value < 0x20 && value != 0x09 && value != 0x0A && value != 0x0D) {
+                    continue
+                }
+                if (0x80 ... 0x9F).contains(value) {
+                    continue
+                }
+                result.append(UnicodeScalar(value)!)
+                continue
+            }
+
+            guard index < scalars.endIndex else { break }
+            let sequenceType = scalars[index].value
+            index = scalars.index(after: index)
+
+            if sequenceType == 0x5B { // CSI: ESC [ ... final byte
+                while index < scalars.endIndex {
+                    let finalByte = scalars[index].value
+                    index = scalars.index(after: index)
+                    if (0x40 ... 0x7E).contains(finalByte) { break }
+                }
+            } else if sequenceType == 0x5D { // OSC: ESC ] ... BEL or ST
+                while index < scalars.endIndex {
+                    let next = scalars[index].value
+                    index = scalars.index(after: index)
+                    if next == 0x07 { break }
+                    if next == 0x1B, index < scalars.endIndex, scalars[index].value == 0x5C {
+                        index = scalars.index(after: index)
+                        break
+                    }
+                }
+            } else if sequenceType == 0x1B, index < scalars.endIndex, scalars[index].value == 0x5C {
+                index = scalars.index(after: index)
+            }
+        }
+
+        return String(result)
     }
 
     @MainActor
@@ -1164,6 +1228,8 @@ private enum FeatureRunError: LocalizedError {
 }
 
 private struct FeatureRunProgressView: View {
+    @SwiftUI.Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
     let activity: FeatureRunActivity
     let phase: String?
     let message: String?
@@ -1192,6 +1258,50 @@ private struct FeatureRunProgressView: View {
                 .accessibilityLabel(activity.isFailure ? "Dismiss" : "Hide progress")
             }
 
+            statusContent
+
+            if activity.isFailure {
+                HStack(spacing: 12) {
+                    Button("Dismiss", action: onDismiss)
+                        .buttonStyle(.bordered)
+                    Button("Retry", action: onRetry)
+                        .buttonStyle(.borderedProminent)
+                }
+            } else {
+                Button("Hide", action: onDismiss)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: 640)
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var statusContent: some View {
+        if horizontalSizeClass == .regular {
+            VStack(spacing: 12) {
+                Image(systemName: activity.compactIcon)
+                    .font(.system(size: 38, weight: .semibold))
+                    .foregroundStyle(activity.isFailure ? T3Colors.danger : T3Colors.accent)
+
+                VStack(spacing: 5) {
+                    Text(detailTitle)
+                        .font(T3Typography.supportingStrong)
+                        .foregroundStyle(T3Colors.textPrimary)
+                        .multilineTextAlignment(.center)
+                    if let detailMessage {
+                        Text(detailMessage)
+                            .font(T3Typography.supporting)
+                            .foregroundStyle(T3Colors.textSecondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: 520)
+            }
+            .frame(maxWidth: .infinity)
+        } else {
             HStack(alignment: .top, spacing: 14) {
                 Image(systemName: activity.compactIcon)
                     .font(.system(size: 26, weight: .semibold))
@@ -1211,22 +1321,7 @@ private struct FeatureRunProgressView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            if activity.isFailure {
-                HStack(spacing: 12) {
-                    Button("Dismiss", action: onDismiss)
-                        .buttonStyle(.bordered)
-                    Button("Retry", action: onRetry)
-                        .buttonStyle(.borderedProminent)
-                }
-            } else {
-                Button("Hide", action: onDismiss)
-                    .buttonStyle(.bordered)
-            }
         }
-        .padding(22)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(T3Colors.background)
     }
 
     private var title: String {
