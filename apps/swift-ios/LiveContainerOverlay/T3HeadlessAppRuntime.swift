@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum T3LaunchLog {
     static func write(_ message: String) {
@@ -53,12 +54,7 @@ enum T3HeadlessAppRuntime {
         if artifactURL.isFileURL {
             try fileManager.copyItem(at: artifactURL, to: ipaURL)
         } else {
-            let (downloadedURL, response) = try await URLSession.shared.download(from: artifactURL)
-            if let response = response as? HTTPURLResponse,
-               !(200 ..< 300).contains(response.statusCode) {
-                throw T3HeadlessAppRuntimeError.downloadFailed(response.statusCode)
-            }
-            try fileManager.moveItem(at: downloadedURL, to: ipaURL)
+            try await download(artifactURL: artifactURL, destinationURL: ipaURL)
         }
 
         let extractResult = await decompress(
@@ -70,12 +66,11 @@ enum T3HeadlessAppRuntime {
         }
 
         let payloadURL = workingDirectory.appendingPathComponent("Payload", isDirectory: true)
-        let appURLs = try fileManager.contentsOfDirectory(
-            at: payloadURL,
-            includingPropertiesForKeys: nil
-        ).filter { $0.pathExtension.lowercased() == "app" }
-        guard appURLs.count == 1,
-              let incomingInfo = LCAppInfo(bundlePath: appURLs[0].path),
+        let payloadContents = try fileManager.contentsOfDirectory(atPath: payloadURL.path)
+        guard let appBundleName = payloadContents.first(where: { $0.hasSuffix(".app") }),
+              let incomingInfo = LCAppInfo(
+                  bundlePath: payloadURL.appendingPathComponent(appBundleName).path
+              ),
               let bundleIdentifier = incomingInfo.bundleIdentifier() else {
             throw T3HeadlessAppRuntimeError.invalidIPA
         }
@@ -88,20 +83,49 @@ enum T3HeadlessAppRuntime {
             )
         }
 
-        incomingInfo.relativeBundlePath = installedBundleName
-        T3LaunchLog.write("patching and signing \(bundleIdentifier)")
-        let signingResult = await patchAndSign(incomingInfo)
-        T3LaunchLog.write("signing result: success=\(signingResult.success) message=\(signingResult.message ?? "nil")")
-        guard signingResult.success else {
-            throw T3HeadlessAppRuntimeError.signingFailed(
-                signingResult.message ?? "The app runtime could not prepare this build."
-            )
+        let artifactFingerprint = try sha256(of: ipaURL)
+
+        let appFolderURL = payloadURL.appendingPathComponent(appBundleName)
+        // Keep loose Godot/Unity resources with the guest before signing. A
+        // stock installer moves only the .app and would otherwise drop them.
+        let looseResources = [payloadURL, workingDirectory].flatMap { directory in
+            (try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil
+            ))?.filter {
+                let ext = $0.pathExtension.lowercased()
+                return ext == "pck" || ext == "zip"
+            } ?? []
+        }
+        for sourceURL in looseResources {
+            let destinationURL = appFolderURL.appendingPathComponent(sourceURL.lastPathComponent)
+            if !fileManager.fileExists(atPath: destinationURL.path) {
+                try? fileManager.copyItem(at: sourceURL, to: destinationURL)
+                T3LaunchLog.write("copied loose \(sourceURL.lastPathComponent) into \(appBundleName)")
+            }
         }
 
         let existingApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
             $0.bundleIdentifier == bundleIdentifier
         }
         let previousApp = existingApps.first
+
+        if let activeApp = existingApps.first(where: { app in
+            guard let dataUUID = app.appInfo.dataUUID else { return app.isAppRunning }
+            if #available(iOS 16.1, *), MultitaskManager.isUsing(container: dataUUID) {
+                return true
+            }
+            return app.isAppRunning
+        }) {
+            let previousFingerprint = activeApp.appInfo.info()["T3ArtifactSHA256"] as? String
+            if previousFingerprint == artifactFingerprint {
+                T3LaunchLog.write("same guest build is already running; reusing its multitask window")
+                return activeApp
+            }
+            T3LaunchLog.write("refusing to replace active guest before it exits")
+            throw T3HeadlessAppRuntimeError.appIsRunning
+        }
+
         for app in existingApps {
             if let path = app.appInfo.bundlePath(), fileManager.fileExists(atPath: path) {
                 try fileManager.removeItem(atPath: path)
@@ -120,12 +144,21 @@ enum T3HeadlessAppRuntime {
         if fileManager.fileExists(atPath: destinationURL.path) {
             try fileManager.removeItem(at: destinationURL)
         }
-        try fileManager.moveItem(at: appURLs[0], to: destinationURL)
+        try fileManager.moveItem(at: appFolderURL, to: destinationURL)
 
         guard let installedInfo = LCAppInfo(bundlePath: destinationURL.path) else {
             throw T3HeadlessAppRuntimeError.invalidIPA
         }
         installedInfo.relativeBundlePath = installedBundleName
+        // Patch at the final location, matching LiveContainer's stock install order.
+        T3LaunchLog.write("patching and signing \(bundleIdentifier) at \(destinationURL.path)")
+        let signingResult = await patchAndSign(installedInfo)
+        T3LaunchLog.write("signing result: success=\(signingResult.success) message=\(signingResult.message ?? "nil")")
+        guard signingResult.success else {
+            throw T3HeadlessAppRuntimeError.signingFailed(
+                signingResult.message ?? "The app runtime could not prepare this build."
+            )
+        }
         copyRuntimeConfiguration(from: previousApp?.appInfo, to: installedInfo)
         installedInfo.isShared = true
         installedInfo.isHidden = false
@@ -133,6 +166,7 @@ enum T3HeadlessAppRuntime {
         installedInfo.multitaskSpecified = .yes
         installedInfo.spoofSDKVersion = true
         installedInfo.installationDate = .now
+        installedInfo.info()["T3ArtifactSHA256"] = artifactFingerprint
         installedInfo.save()
 
         let installedApp = LCAppModel(appInfo: installedInfo)
@@ -146,6 +180,51 @@ enum T3HeadlessAppRuntime {
                 .addObjects(from: schemes)
         }
         return installedApp
+    }
+
+    private static func download(
+        artifactURL: URL,
+        destinationURL: URL
+    ) async throws {
+        T3LaunchLog.write("downloading \(artifactURL.absoluteString.prefix(120))")
+        let configuration = URLSessionConfiguration.default
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 180
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        var resumeData: Data?
+        var lastError: Error?
+        for attempt in 0 ..< 2 {
+            do {
+                let result: (URL, URLResponse)
+                if let resumeData {
+                    result = try await session.download(resumeFrom: resumeData)
+                } else {
+                    result = try await session.download(from: artifactURL)
+                }
+                if let response = result.1 as? HTTPURLResponse,
+                   !(200 ..< 300).contains(response.statusCode) {
+                    T3LaunchLog.write("download failed HTTP \(response.statusCode)")
+                    throw T3HeadlessAppRuntimeError.downloadFailed(response.statusCode)
+                }
+                T3LaunchLog.write("download complete, moving to \(destinationURL.path)")
+                try FileManager.default.moveItem(at: result.0, to: destinationURL)
+                return
+            } catch let error as T3HeadlessAppRuntimeError {
+                throw error
+            } catch {
+                lastError = error
+                let nsError = error as NSError
+                resumeData = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+                T3LaunchLog.write(
+                    "download attempt \(attempt + 1) failed: \(error.localizedDescription); "
+                        + (resumeData == nil ? "restarting" : "resuming")
+                )
+            }
+        }
+        throw lastError ?? T3HeadlessAppRuntimeError.downloadFailed(0)
     }
 
     nonisolated private static func decompress(
@@ -179,6 +258,17 @@ enum T3HeadlessAppRuntime {
         }
     }
 
+    private static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func copyRuntimeConfiguration(
         from previous: LCAppInfo?,
         to installed: LCAppInfo
@@ -204,6 +294,7 @@ private enum T3HeadlessAppRuntimeError: LocalizedError {
     case downloadFailed(Int)
     case invalidIPA
     case bundleIdentifierMismatch(expected: String, actual: String)
+    case appIsRunning
     case signingFailed(String)
 
     var errorDescription: String? {
@@ -214,6 +305,8 @@ private enum T3HeadlessAppRuntimeError: LocalizedError {
             "The latest build is not a valid iPhone IPA."
         case let .bundleIdentifierMismatch(expected, actual):
             "The build uses bundle ID \(actual), but the manifest specifies \(expected)."
+        case .appIsRunning:
+            "The current iPhone app is still running. Close it, then tap Run again to install the new build safely."
         case let .signingFailed(message):
             message
         }

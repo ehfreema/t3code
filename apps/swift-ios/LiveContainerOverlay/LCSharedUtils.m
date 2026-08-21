@@ -244,11 +244,16 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 
     // Move only T3's previous host data. Never move or delete the stock
     // LiveContainer root or another guest's data.
-    NSURL *legacyApp = [[legacyRoot URLByAppendingPathComponent:@"Applications" isDirectory:YES]
-        URLByAppendingPathComponent:@"codes.t3.t3code-live.app" isDirectory:YES];
     NSURL *isolatedApps = [isolatedRoot URLByAppendingPathComponent:@"Applications" isDirectory:YES];
-    NSURL *isolatedApp = [isolatedApps URLByAppendingPathComponent:@"codes.t3.t3code-live.app" isDirectory:YES];
-    if ([fm fileExistsAtPath:legacyApp.path] && ![fm fileExistsAtPath:isolatedApp.path]) {
+    NSString *hostBundleID = NSBundle.mainBundle.bundleIdentifier ?: @"codes.t3.t3code-live";
+    NSArray<NSString *> *legacyBundleIDs = @[@"codes.t3.t3code-live", hostBundleID];
+    for (NSString *legacyBundleID in legacyBundleIDs) {
+        NSURL *legacyApp = [[legacyRoot URLByAppendingPathComponent:@"Applications" isDirectory:YES]
+            URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.app", legacyBundleID] isDirectory:YES];
+        NSURL *isolatedApp = [isolatedApps URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.app", hostBundleID] isDirectory:YES];
+        if (![fm fileExistsAtPath:legacyApp.path] || [fm fileExistsAtPath:isolatedApp.path]) {
+            continue;
+        }
         [fm createDirectoryAtURL:isolatedApps withIntermediateDirectories:YES attributes:nil error:nil];
         [fm moveItemAtURL:legacyApp toURL:isolatedApp error:nil];
 
@@ -267,6 +272,7 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
                 }
             }
         }
+        break;
     }
 }
 

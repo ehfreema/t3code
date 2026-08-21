@@ -1,7 +1,7 @@
 # Build and Run an iPhone App From T3 Code
 
-T3 Code Live can ask an agent to build an iPhone app. It then installs and runs
-that build on the same iPhone.
+T3 Code Live can build an iPhone app on the connected Mac. It then installs and
+runs the build on the same iPhone.
 
 This feature applies to the SwiftUI mobile client. The React Native mobile
 client does not include this feature.
@@ -18,13 +18,19 @@ not show it either.
 ## Build the App
 
 1. Open a thread for the iOS app project.
-2. Select the **Run** button in the thread toolbar.
+2. Open the thread menu.
+3. Select **Run** or **Run iOS App**.
 
-If no build exists, the agent makes an arm64 device IPA. T3 Code runs it when
-the build finishes. If a build exists, T3 Code runs it immediately.
+If no build exists, T3 Code makes an arm64 device IPA. T3 Code also makes a new
+IPA after a workspace file changes.
 
-The agent stores the IPA in `.t3/builds/`. It also writes the app information to
+If no workspace file changed, T3 Code uses the existing IPA.
+
+T3 Code stores the IPA in `.t3/builds/`. It writes the app information to
 `.t3/ios-app.json`.
+
+The progress panel shows each build phase. Select **Hide** to close the panel.
+The build continues, and its status remains next to the thread menu.
 
 ## Return to T3 Code
 

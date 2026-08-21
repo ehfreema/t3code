@@ -68,6 +68,8 @@ public protocol FeatureClient: AnyObject {
     func loadEarlierThreadTurns(id: String) async throws -> FeatureThreadDetail?
     func releaseThread(id: String)
     func sendMessage(threadID: String, text: String, selection: FeatureSelection?) async throws
+    /// Starts a deterministic server-side iOS app build without agent involvement.
+    func startIOSBuild(threadID: String, workspaceRoot: String) async throws
     func sendMessage(
         threadID: String,
         text: String,
@@ -194,6 +196,10 @@ public extension FeatureClient {
 
     func regenerateThreadTitle(id _: String) async throws {
         throw FeatureCapabilityUnavailable("Thread title regeneration")
+    }
+
+    func startIOSBuild(threadID _: String, workspaceRoot _: String) async throws {
+        throw FeatureCapabilityUnavailable("iPhone builds")
     }
 
     func loadEarlierThreadTurns(id _: String) async throws -> FeatureThreadDetail? {

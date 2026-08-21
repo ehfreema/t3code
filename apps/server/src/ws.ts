@@ -1,6 +1,4 @@
 import * as Cause from "effect/Cause";
-import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -1445,17 +1443,9 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.iosBuildStart]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.iosBuildStart,
-            IosBuild.startIOSBuild(input).pipe(
-              Effect.provide(
-                NodeChildProcessSpawner.layer.pipe(Layer.provideMerge(NodeServices.layer)),
-              ),
-            ),
-            {
-              "rpc.aggregate": "ios-build",
-            },
-          ),
+          observeRpcEffect(WS_METHODS.iosBuildStart, IosBuild.startIOSBuild(input), {
+            "rpc.aggregate": "ios-build",
+          }),
         [WS_METHODS.serverGetConfig]: (_input) =>
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
             "rpc.aggregate": "server",
@@ -1932,10 +1922,17 @@ const makeWsRpcLayer = (
                   resource: input.resource,
                 });
               }
-              return yield* issueAssetUrl({
-                resource: input.resource,
-                workspaceRoot: thread.value.worktreePath ?? project.value.workspaceRoot,
-              });
+              // A cleaned worktree can disappear while an iOS artifact remains
+              // in the main project. Try the thread workspace first, then the
+              // project root so an existing build remains runnable.
+              const primaryRoot = thread.value.worktreePath ?? project.value.workspaceRoot;
+              const fallbackRoot = thread.value.worktreePath ? project.value.workspaceRoot : null;
+              const attempt = (workspaceRoot: string) =>
+                issueAssetUrl({ resource: input.resource, workspaceRoot });
+              if (!fallbackRoot || primaryRoot === fallbackRoot) {
+                return yield* attempt(primaryRoot);
+              }
+              return yield* attempt(primaryRoot).pipe(Effect.catch(() => attempt(fallbackRoot)));
             }),
             { "rpc.aggregate": "workspace" },
           ),

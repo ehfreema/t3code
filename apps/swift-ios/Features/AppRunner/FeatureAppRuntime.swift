@@ -94,12 +94,13 @@ private final class FeatureLiveContainerRequestWaiter: @unchecked Sendable {
         }
         // The runtime can be suspended (e.g. while the user approves the certificate
         // export in SideStore) or killed; never leave the caller hanging forever.
-        timeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 240_000_000_000)
-            guard let self else { return }
-            self.receive(
-                requestID: self.requestID,
-                error: "The iPhone app runtime did not respond within 4 minutes. Please try again."
+        let requestID = self.requestID
+        timeoutTask = Task.detached { [weak self, requestID] in
+            try? await Task.sleep(nanoseconds: 420_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.receive(
+                requestID: requestID,
+                error: "The iPhone app runtime did not respond within 7 minutes. Please try again."
             )
         }
     }
@@ -135,7 +136,7 @@ public enum FeatureAppRuntimeError: LocalizedError, Equatable, Sendable {
         case .invalidRoute:
             "T3 Code could not create the app runtime route."
         case .runtimeUnavailable:
-            "Install T3 Code Live to run iPhone apps on this device."
+            "This T3 Code build does not include the embedded iPhone app runtime."
         case let .runtimeFailed(message):
             message
         }

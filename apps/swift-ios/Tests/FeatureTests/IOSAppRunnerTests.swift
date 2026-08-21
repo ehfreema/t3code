@@ -171,7 +171,7 @@ struct IOSAppRunnerTests {
         #expect(FeatureIOSAppBuildPrompt.text.contains("Payload/<AppName>.app"))
         #expect(FeatureIOSAppBuildPrompt.text.contains("arm64"))
         #expect(FeatureIOSAppBuildPrompt.text.contains("artifactChunks"))
-        #expect(FeatureIOSAppBuildPrompt.text.contains("262144"))
+        #expect(FeatureIOSAppBuildPrompt.text.contains("524288"))
         #expect(FeatureIOSAppBuildPrompt.visibleText.contains("Build and run this iPhone app"))
         #expect(!FeatureIOSAppBuildPrompt.visibleText.contains("Payload/"))
     }
@@ -182,6 +182,140 @@ struct IOSAppRunnerTests {
         #expect(
             FeatureIOSAppWorkspaceCommand.compatibilityPath(for: ".t3/builds/App.ipa")
                 == ".t3/builds/App.ipa.t3asset.pdf"
+        )
+    }
+
+    @Test
+    func completedTurnWithoutWorkspaceChangesReusesTheExistingArtifact() {
+        let builtAt = Date(timeIntervalSince1970: 100)
+        let thread = FeatureThread(
+            id: "thread-1",
+            projectID: "project-1",
+            title: "App",
+            state: .completed,
+            latestTurnCompletedAt: Date(timeIntervalSince1970: 200),
+            latestWorkspaceChangeAt: Date(timeIntervalSince1970: 50),
+            workspaceChangeTrackingAvailable: true
+        )
+
+        #expect(FeatureIOSAppBuildFreshness.canReuseArtifact(builtAt: builtAt, thread: thread))
+    }
+
+    @Test
+    func workspaceChangeAfterTheBuildRequiresANewArtifact() {
+        let builtAt = Date(timeIntervalSince1970: 100)
+        let thread = FeatureThread(
+            id: "thread-1",
+            projectID: "project-1",
+            title: "App",
+            state: .completed,
+            latestTurnCompletedAt: Date(timeIntervalSince1970: 200),
+            latestWorkspaceChangeAt: Date(timeIntervalSince1970: 200),
+            workspaceChangeTrackingAvailable: true
+        )
+
+        #expect(!FeatureIOSAppBuildFreshness.canReuseArtifact(builtAt: builtAt, thread: thread))
+    }
+
+    @Test
+    func olderSnapshotsFallBackToTheLatestTurnTime() {
+        let builtAt = Date(timeIntervalSince1970: 100)
+        let thread = FeatureThread(
+            id: "thread-1",
+            projectID: "project-1",
+            title: "App",
+            state: .completed,
+            latestTurnCompletedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        #expect(!FeatureIOSAppBuildFreshness.canReuseArtifact(builtAt: builtAt, thread: thread))
+    }
+
+    @Test
+    func activeBuildStatusNeverReusesThePreviousArtifact() {
+        let thread = FeatureThread(
+            id: "thread-1",
+            projectID: "project-1",
+            title: "App",
+            state: .completed,
+            latestWorkspaceChangeAt: Date(timeIntervalSince1970: 50),
+            workspaceChangeTrackingAvailable: true
+        )
+
+        #expect(
+            !FeatureIOSAppBuildFreshness.canReuseArtifact(
+                buildPhase: "building",
+                builtAt: Date(timeIntervalSince1970: 100),
+                thread: thread
+            )
+        )
+    }
+
+    @Test
+    func nextWebsiteConfigurationUsesItsPackageDirectoryAndRemoteBinding() {
+        let configuration = FeatureWebsiteProjectDetector.configuration(
+            packageJSON: """
+            {
+              "name": "policy-viewer",
+              "scripts": { "dev": "next dev" },
+              "dependencies": { "next": "14.2.21" }
+            }
+            """,
+            packagePath: "policy-viewer/t3/package.json"
+        )
+
+        #expect(configuration?.command == "cd 'policy-viewer/t3' && npm run dev -- --hostname 0.0.0.0")
+        #expect(configuration?.localPreviewURL.absoluteString == "http://localhost:3000")
+    }
+
+    @Test
+    func viteWebsiteConfigurationKeepsAnExplicitPort() {
+        let configuration = FeatureWebsiteProjectDetector.configuration(
+            packageJSON: """
+            {
+              "packageManager": "pnpm@9.0.0",
+              "scripts": { "dev": "vite --port 4173" },
+              "devDependencies": { "vite": "6.0.0" }
+            }
+            """,
+            packagePath: "package.json"
+        )
+
+        #expect(configuration?.command == "pnpm run dev -- --host 0.0.0.0")
+        #expect(configuration?.localPreviewURL.absoluteString == "http://localhost:4173")
+    }
+
+    @Test
+    func websitePreviewUsesTheConnectedEnvironmentHost() throws {
+        let url = try FeatureWebsitePreviewURL.reachableURL(
+            URL(string: "http://localhost:3000/dashboard")!,
+            environmentBaseURL: URL(string: "https://macbook-pro.example.ts.net:5733")!
+        )
+
+        #expect(url.absoluteString == "http://macbook-pro.example.ts.net:3000/dashboard")
+    }
+
+    @Test
+    func websitePreviewRewritesAnAllInterfacesHost() throws {
+        let url = try FeatureWebsitePreviewURL.reachableURL(
+            URL(string: "http://0.0.0.0:5173")!,
+            environmentBaseURL: URL(string: "https://macbook-pro.example.ts.net:5733")!
+        )
+
+        #expect(url.absoluteString == "http://macbook-pro.example.ts.net:5173")
+    }
+
+    @Test
+    func websitePreviewRequiresADirectEnvironmentHost() {
+        #expect(
+            FeatureWebsitePreviewURL.supportsDirectPortAccess(
+                URL(string: "https://macbook-pro.example.ts.net:5733")!
+            )
+        )
+        #expect(
+            !FeatureWebsitePreviewURL.supportsDirectPortAccess(
+                URL(string: "https://relay.t3.codes")!
+            )
         )
     }
 }

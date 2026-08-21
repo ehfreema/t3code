@@ -49,7 +49,7 @@ enum FeatureIOSAppWorkspaceCommand {
         chunks=[]
         with artifact.open("rb") as source:
             index=0
-            while data := source.read(262144):
+            while data := source.read(524288):
                 path=pathlib.Path(f"{artifact}.b64.{index:04d}.txt")
                 path.write_text(base64.b64encode(data).decode("ascii"))
                 chunks.append(str(path))

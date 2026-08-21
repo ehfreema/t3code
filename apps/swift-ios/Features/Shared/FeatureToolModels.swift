@@ -19,6 +19,19 @@ public protocol FeatureWorkspaceAssetResolving: AnyObject {
     func workspaceAssetURL(threadID: String, path: String) async throws -> URL
 }
 
+/// Resolves one manifest-selected IPA through the server's exact-file asset capability.
+@MainActor
+public protocol FeatureIOSAppArtifactResolving: AnyObject {
+    func iosAppArtifactURL(threadID: String, path: String) async throws -> URL
+}
+
+/// Rewrites a workspace-local preview URL so the connected device can reach it.
+@MainActor
+public protocol FeatureWebsitePreviewResolving: AnyObject {
+    func canExposeWebsitePreview(threadID: String) throws -> Bool
+    func websitePreviewURL(threadID: String, localURL: URL) throws -> URL
+}
+
 public enum FeatureFileKind: String, Sendable, Codable {
     case file
     case directory

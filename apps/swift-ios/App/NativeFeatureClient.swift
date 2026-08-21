@@ -24,7 +24,8 @@ private struct T3ConnectManagedCleanupError: LocalizedError {
 /// Composes the transport-focused Core layer with the UI-focused Features layer.
 @MainActor
 final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
-    FeatureProjectCreationClient, FeatureWorkspaceAssetResolving, T3ConnectCapable
+    FeatureProjectCreationClient, FeatureWorkspaceAssetResolving,
+    FeatureIOSAppArtifactResolving, FeatureWebsitePreviewResolving, T3ConnectCapable
 {
     private static let maximumRetainedThreadDetails = 6
     private static let t3ConnectLogger = Logger(
@@ -781,6 +782,52 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         return try await route.client.resolvedAssetURL(
             resource: .workspaceFile(threadID: route.wireID, path: path)
         )
+    }
+
+    func startIOSBuild(threadID: String, workspaceRoot: String) async throws {
+        let route = try threadRoute(for: threadID)
+        try await route.client.startIOSBuild(
+            workspaceRoot: workspaceRoot,
+            threadID: route.wireID
+        )
+    }
+
+    func iosAppArtifactURL(threadID: String, path: String) async throws -> URL {
+        let route = try threadRoute(for: threadID)
+        if path.lowercased().hasSuffix(".t3asset.pdf") {
+            return try await route.client.resolvedAssetURL(
+                resource: .workspaceFile(threadID: route.wireID, path: path)
+            )
+        }
+        do {
+            return try await route.client.resolvedAssetURL(
+                resource: .iosAppArtifact(threadID: route.wireID, path: path)
+            )
+        } catch {
+            let compatibilityPath = try await FeatureIOSAppWorkspaceCommand.createCompatibilityAsset(
+                client: self,
+                threadID: threadID,
+                artifactPath: path
+            )
+            return try await route.client.resolvedAssetURL(
+                resource: .workspaceFile(threadID: route.wireID, path: compatibilityPath)
+            )
+        }
+    }
+
+    func websitePreviewURL(threadID: String, localURL: URL) throws -> URL {
+        let route = try threadRoute(for: threadID)
+        return try FeatureWebsitePreviewURL.reachableURL(
+            localURL,
+            environmentBaseURL: route.client.environment.httpBaseURL
+        )
+    }
+
+    func canExposeWebsitePreview(threadID: String) throws -> Bool {
+        let environment = try threadRoute(for: threadID).client.environment
+        if environment.kind == .managedDPoP { return false }
+        if environment.kind == .local { return true }
+        return FeatureWebsitePreviewURL.supportsDirectPortAccess(environment.httpBaseURL)
     }
 
     func cachedProjectFavicon(
@@ -4093,6 +4140,14 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             environmentID: environment.id
         )
         let backgroundWorkIsActive = backgroundLiveness == .working
+        let latestTurnHasCheckpoint = thread.latestTurn.map { latestTurn in
+            latestTurn.completedAt != nil
+                && thread.checkpoints.contains { $0.turnId == latestTurn.turnId }
+        } ?? true
+        let latestWorkspaceChangeAt = thread.checkpoints
+            .filter { $0.status != "ready" || !$0.files.isEmpty }
+            .map { parseDate($0.completedAt) }
+            .max()
         return FeatureThread(
             id: FeatureScopedID.thread(environmentID: environment.id, wireID: thread.id),
             wireID: thread.id,
@@ -4148,6 +4203,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 fallbackUpdatedAt: thread.updatedAt
             ),
             latestTurnCompletedAt: thread.latestTurn?.completedAt.map(parseDate),
+            latestWorkspaceChangeAt: latestWorkspaceChangeAt,
+            workspaceChangeTrackingAvailable: latestTurnHasCheckpoint,
             runtimeMode: mapRuntimeMode(thread.runtimeMode),
             interactionMode: mapInteractionMode(thread.interactionMode)
         )

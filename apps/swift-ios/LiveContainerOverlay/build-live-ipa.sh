@@ -5,15 +5,17 @@ LIVECONTAINER_REPOSITORY="https://github.com/LiveContainer/LiveContainer.git"
 # Upstream pin. Override with LIVECONTAINER_REVISION=latest to build against
 # upstream main's HEAD, or use bump-livecontainer.sh to advance the pin safely.
 LIVECONTAINER_REVISION=${LIVECONTAINER_REVISION:-"7e356bc3ab0e05584977281937da9308740b997b"}
-T3_LIVE_BUNDLE_IDENTIFIER="codes.t3.t3code-live"
+T3_LIVE_BUNDLE_IDENTIFIER=${T3_LIVE_BUNDLE_IDENTIFIER:-"codes.t3.t3code-live"}
 T3_LIVE_URL_SCHEME="t3code-livecontainer"
+T3_LIVE_DISPLAY_NAME=${T3_LIVE_DISPLAY_NAME:-"T3 Code Live"}
 T3_LIVE_MARKETING_VERSION=${T3_LIVE_MARKETING_VERSION:-"0.1.0"}
 T3_LIVE_BUILD_NUMBER=${T3_LIVE_BUILD_NUMBER:-"$(date -u +%s)"}
 
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SWIFT_IOS_DIRECTORY=$(CDPATH= cd -- "$SCRIPT_DIRECTORY/.." && pwd)
 REPOSITORY_ROOT=$(CDPATH= cd -- "$SWIFT_IOS_DIRECTORY/../.." && pwd)
-T3_SWIFT_APP_ICON_DIRECTORY="$SWIFT_IOS_DIRECTORY/Resources/Assets.xcassets/AppIcon.appiconset"
+T3_SWIFT_APP_ICON_PATH="$SWIFT_IOS_DIRECTORY/Resources/lct3.icon"
+T3_SWIFT_APP_ICON_NAME="lct3"
 BUILD_DIRECTORY=${T3_LIVE_BUILD_DIRECTORY:-"$SWIFT_IOS_DIRECTORY/.livecontainer"}
 LIVECONTAINER_DIRECTORY="$BUILD_DIRECTORY/LiveContainer"
 KIT_DERIVED_DATA="$BUILD_DIRECTORY/T3CodeKitDerivedData"
@@ -209,15 +211,55 @@ cp \
     "$SCRIPT_DIRECTORY/zsign.mm" \
     "$LIVECONTAINER_DIRECTORY/ZSign/zsign.mm"
 
-if [ ! -d "$T3_SWIFT_APP_ICON_DIRECTORY" ]; then
-    printf 'T3 Swift app icon was not found: %s\n' "$T3_SWIFT_APP_ICON_DIRECTORY" >&2
+if [ ! -d "$T3_SWIFT_APP_ICON_PATH" ]; then
+    printf 'T3 Swift app icon was not found: %s\n' "$T3_SWIFT_APP_ICON_PATH" >&2
     exit 1
 fi
 remove_directory "$LIVECONTAINER_DIRECTORY/Resources/Assets.xcassets/AppIcon.appiconset"
 ditto \
-    "$T3_SWIFT_APP_ICON_DIRECTORY" \
-    "$LIVECONTAINER_DIRECTORY/Resources/Assets.xcassets/AppIcon.appiconset"
+    "$T3_SWIFT_APP_ICON_PATH" \
+    "$LIVECONTAINER_DIRECTORY/$T3_SWIFT_APP_ICON_NAME.icon"
 remove_directory "$LIVECONTAINER_DIRECTORY/Resources/Assets.xcassets/AppIconGrey.appiconset"
+
+python3 - "$LIVECONTAINER_DIRECTORY/LiveContainer.xcodeproj/project.pbxproj" "$T3_SWIFT_APP_ICON_NAME" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+icon_name = sys.argv[2]
+source = path.read_text()
+needle = "ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;"
+if needle not in source:
+    raise SystemExit("LiveContainer app icon build setting changed. Update the icon integration patch.")
+source = source.replace(needle, f"ASSETCATALOG_COMPILER_APPICON_NAME = {icon_name};")
+
+file_ref_id = "F30000000000000000000001"
+build_file_id = "F30000000000000000000002"
+file_ref = f'\t\t{file_ref_id} /* {icon_name}.icon */ = {{isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = {icon_name}.icon; sourceTree = "<group>"; }};'
+build_file = f'\t\t{build_file_id} /* {icon_name}.icon in Resources */ = {{isa = PBXBuildFile; fileRef = {file_ref_id} /* {icon_name}.icon */; }};'
+if f"{file_ref_id} /* {icon_name}.icon */" not in source:
+    source = source.replace(
+        "/* End PBXBuildFile section */",
+        f"{build_file}\n/* End PBXBuildFile section */",
+        1,
+    )
+    source = source.replace(
+        "/* End PBXFileReference section */",
+        f"{file_ref}\n/* End PBXFileReference section */",
+        1,
+    )
+    root_group = "\t\t17DCE9942C7067EC00731D42 = {"
+    root_children = "\t\t\tchildren = (\n"
+    root_start = source.index(root_group)
+    children_start = source.index(root_children, root_start) + len(root_children)
+    source = source[:children_start] + f"\t\t\t\t{file_ref_id} /* {icon_name}.icon */,\n" + source[children_start:]
+    resources_phase = "\t\t17DCE99B2C7067EC00731D42 /* Resources */ = {"
+    phase_start = source.index(resources_phase)
+    resource_files = "\t\t\tfiles = (\n"
+    files_start = source.index(resource_files, phase_start) + len(resource_files)
+    source = source[:files_start] + f"\t\t\t\t{build_file_id} /* {icon_name}.icon in Resources */,\n" + source[files_start:]
+path.write_text(source)
+PY
 
 python3 - "$LIVECONTAINER_DIRECTORY/LiveContainerSwiftUI/App/LiveContainerSwiftUIApp.swift" <<'PY'
 from pathlib import Path
@@ -271,7 +313,7 @@ fi
 
 rm -rf "$STAGING_DIRECTORY"
 mkdir -p "$STAGING_DIRECTORY/Payload"
-APP_PATH="$STAGING_DIRECTORY/Payload/T3 Code Live.app"
+APP_PATH="$STAGING_DIRECTORY/Payload/$T3_LIVE_DISPLAY_NAME.app"
 ditto "$LIVE_APP" "$APP_PATH"
 remove_directory "$APP_PATH/PlugIns/ShareExtension.appex"
 remove_directory "$APP_PATH/PlugIns/LaunchAppExtension.appex"
@@ -297,7 +339,8 @@ python3 - \
     "$T3_LIVE_BUNDLE_IDENTIFIER" \
     "$T3_LIVE_URL_SCHEME" \
     "$T3_LIVE_MARKETING_VERSION" \
-    "$T3_LIVE_BUILD_NUMBER" <<'PY'
+    "$T3_LIVE_BUILD_NUMBER" \
+    "$T3_LIVE_DISPLAY_NAME" <<'PY'
 import os
 import plistlib
 from pathlib import Path
@@ -308,10 +351,11 @@ bundle_identifier = sys.argv[2]
 url_scheme = sys.argv[3]
 marketing_version = sys.argv[4]
 build_number = sys.argv[5]
+display_name = sys.argv[6]
 with path.open("rb") as stream:
     info = plistlib.load(stream)
 
-info["CFBundleDisplayName"] = "T3 Code Live"
+info["CFBundleDisplayName"] = display_name
 info["CFBundleName"] = "T3CodeLive"
 info["CFBundleIdentifier"] = bundle_identifier
 info["CFBundleShortVersionString"] = marketing_version
@@ -367,7 +411,7 @@ if not any(
 info.setdefault("ALTAppGroups", ["group.com.SideStore.SideStore", "group.com.rileytestut.AltStore"])
 
 query_schemes = info.setdefault("LSApplicationQueriesSchemes", [])
-for scheme in ["livecontainer", "livecontainer2", "livecontainer3", "t3code-livecontainer", "altstore-classic"]:
+for scheme in ["livecontainer", "livecontainer2", "livecontainer3", "t3code-livecontainer", "sidestore", "altstore", "altstore-classic"]:
     if scheme not in query_schemes:
         query_schemes.append(scheme)
 
@@ -405,20 +449,21 @@ PY
 # SideStore/AltStore read these entitlements from the signature and grant the
 # corresponding app groups + keychain groups in the provisioning profile.
 ENTITLEMENTS_TMP="$(mktemp /tmp/t3-live-entitlements.XXXXXX.plist)"
-python3 - "$LIVECONTAINER_DIRECTORY/entitlements.xml" "$ENTITLEMENTS_TMP" <<'PY'
+python3 - "$LIVECONTAINER_DIRECTORY/entitlements.xml" "$ENTITLEMENTS_TMP" "$T3_LIVE_BUNDLE_IDENTIFIER" <<'PY'
 import sys
 from pathlib import Path
 import plistlib
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
+bundle_identifier = sys.argv[3]
 text = src.read_text()
 # Expand Xcode variables with the same placeholder team the stock LiveContainer IPA uses.
 text = text.replace("$(AppIdentifierPrefix)", "AAAAA11111.")
 text = text.replace("$(DEVELOPMENT_TEAM)", "AAAAA11111")
 text = text.replace("$(APP_GROUP_SIDESTORE)", "group.com.SideStore.SideStore")
 text = text.replace("$(APP_GROUP_ALTSTORE)", "group.com.rileytestut.AltStore")
-text = text.replace("$(PRODUCT_BUNDLE_IDENTIFIER)", "codes.t3.t3code-live")
+text = text.replace("$(PRODUCT_BUNDLE_IDENTIFIER)", bundle_identifier)
 try:
     data = text.encode()
     plist = plistlib.loads(data)
@@ -446,19 +491,20 @@ fi
 LIVEPROCESS_APPEX_PATH="$APP_PATH/PlugIns/LiveProcess.appex"
 if [ -d "$LIVEPROCESS_APPEX_PATH" ] && [ -f "$LIVECONTAINER_DIRECTORY/LiveProcess/LiveProcess.entitlements" ]; then
     ENTITLEMENTS_TMP="$(mktemp /tmp/t3-liveprocess-entitlements.XXXXXX.plist)"
-    python3 - "$LIVECONTAINER_DIRECTORY/LiveProcess/LiveProcess.entitlements" "$ENTITLEMENTS_TMP" <<'PY'
+    python3 - "$LIVECONTAINER_DIRECTORY/LiveProcess/LiveProcess.entitlements" "$ENTITLEMENTS_TMP" "$T3_LIVE_BUNDLE_IDENTIFIER" <<'PY'
 import sys
 from pathlib import Path
 import plistlib
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
+bundle_identifier = sys.argv[3]
 text = src.read_text()
 text = text.replace("$(AppIdentifierPrefix)", "AAAAA11111.")
 text = text.replace("$(DEVELOPMENT_TEAM)", "AAAAA11111")
 text = text.replace("$(APP_GROUP_SIDESTORE)", "group.com.SideStore.SideStore")
 text = text.replace("$(APP_GROUP_ALTSTORE)", "group.com.rileytestut.AltStore")
-text = text.replace("$(PRODUCT_BUNDLE_IDENTIFIER)", "codes.t3.t3code-live")
+text = text.replace("$(PRODUCT_BUNDLE_IDENTIFIER)", bundle_identifier)
 try:
     plist = plistlib.loads(text.encode())
     with dst.open("wb") as f:

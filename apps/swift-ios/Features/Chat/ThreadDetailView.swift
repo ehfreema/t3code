@@ -5,12 +5,15 @@ import UIKit
 public struct ThreadDetailView: View {
     @SwiftUI.Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @SwiftUI.Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @SwiftUI.Environment(\.featureAppRuntime) private var appRuntime
+    @SwiftUI.Environment(\.openURL) private var openURL
 
     @Bindable var model: FeatureRootModel
     let thread: FeatureThread
     let submitMessage: (FeatureMessageSubmission) async -> Bool
     let onNavigateBack: () -> Void
     private let draftStore: FeatureComposerDraftStore
+    private let runSession: FeatureRunSession
 
     @State private var draft = ""
     @State private var selection: FeatureSelection?
@@ -25,6 +28,9 @@ public struct ThreadDetailView: View {
     // focus and mirrors it through this binding, because SwiftUI drops
     // writes to a `FocusState` no `.focused()` view registers with.
     @State private var composerFocused = false
+    @State private var isIOSAppProject = false
+    @State private var websiteRunConfiguration: FeatureWebsiteRunConfiguration?
+    @State private var runProgressPresented = false
 
     public init(
         model: FeatureRootModel,
@@ -38,6 +44,7 @@ public struct ThreadDetailView: View {
         self.submitMessage = submitMessage
         self.onNavigateBack = onNavigateBack
         self.draftStore = draftStore
+        self.runSession = model.runSession(for: thread.id)
     }
 
     public var body: some View {
@@ -63,7 +70,13 @@ public struct ThreadDetailView: View {
                 threadHeaderTitle
             }
             ToolbarItem(placement: .primaryAction) {
-                threadActionsMenu
+                HStack(spacing: 8) {
+                    if runSession.activity != .idle {
+                        runActivityButton
+                    }
+                    threadActionsMenu
+                }
+                .fixedSize(horizontal: true, vertical: false)
             }
         }
         .task(id: thread.id) {
@@ -72,11 +85,19 @@ public struct ThreadDetailView: View {
             isLoading = true
             _ = await model.detail(for: thread.id, force: true)
             await restoreDraft(from: restoreBaseline, key: restoreKey)
+            await refreshRunCapabilities()
+            if !isIOSAppProject {
+                Task { await pollIOSAppProjectUntilFound() }
+            }
             isLoading = false
         }
         .onChange(of: draft) { scheduleDraftSave() }
         .onChange(of: attachments) { scheduleDraftSave() }
         .onChange(of: selection) { scheduleDraftSave() }
+        .onChange(of: currentThread.state) { _, state in
+            guard state == .completed else { return }
+            Task { await refreshRunCapabilities() }
+        }
         .onDisappear {
             model.releaseThread(thread.id)
             persistDraftBeforeLeaving()
@@ -111,6 +132,17 @@ public struct ThreadDetailView: View {
             Button("OK") { composerFocused = true }
         } message: {
             Text("Your draft is still here. Check your connection and try again.")
+        }
+        .sheet(isPresented: $runProgressPresented) {
+            FeatureRunProgressView(
+                activity: runSession.activity,
+                phase: runSession.phase,
+                message: runSession.message,
+                onRetry: retryRun,
+                onDismiss: dismissRunProgress
+            )
+            .presentationDetents([.height(300)])
+            .presentationDragIndicator(.visible)
         }
         .background {
             ThreadBackSwipeGestureView(
@@ -227,6 +259,32 @@ public struct ThreadDetailView: View {
 
     private var threadActionsMenu: some View {
         Menu {
+            if canRunIOSApp || canRunWebsite {
+                Section("Run") {
+                    if canRunIOSApp {
+                        Button {
+                            beginRun(.iosApp)
+                        } label: {
+                            Label(
+                                !canRunWebsite ? "Run" : "Run iOS App",
+                                systemImage: "iphone.gen3"
+                            )
+                        }
+                        .disabled(runSession.activity.isBusy)
+                    }
+                    if canRunWebsite {
+                        Button {
+                            beginRun(.website)
+                        } label: {
+                            Label(
+                                canRunIOSApp ? "Run Website" : "Run",
+                                systemImage: "safari"
+                            )
+                        }
+                        .disabled(runSession.activity.isBusy)
+                    }
+                }
+            }
             Section("Workspace") {
                 Button { toolSurface = .files } label: {
                     Label("Files", systemImage: "folder")
@@ -265,7 +323,10 @@ public struct ThreadDetailView: View {
                     }
                 }
                 Button {
-                    Task { _ = await model.detail(for: thread.id, force: true) }
+                    Task {
+                        _ = await model.detail(for: thread.id, force: true)
+                        await refreshRunCapabilities()
+                    }
                 } label: {
                     Label("Reload", systemImage: "arrow.clockwise")
                 }
@@ -292,6 +353,27 @@ public struct ThreadDetailView: View {
         .accessibilityLabel("Thread actions")
     }
 
+    private var runActivityButton: some View {
+        Button {
+            runProgressPresented = true
+        } label: {
+            Group {
+                if runSession.activity.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: runSession.activity.compactIcon)
+                        .font(.body.weight(.semibold))
+                }
+            }
+            .frame(width: T3Metrics.minimumTapTarget, height: T3Metrics.minimumTapTarget)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(runSession.activity.isFailure ? T3Colors.danger : T3Colors.accent)
+        .accessibilityLabel(runSession.activity.accessibilityLabel)
+        .accessibilityHint("Shows Run progress")
+    }
+
     private var headerBranch: String {
         if let branch = currentThread.branch?.trimmingCharacters(in: .whitespacesAndNewlines),
            !branch.isEmpty {
@@ -314,6 +396,488 @@ public struct ThreadDetailView: View {
         case .done: T3Colors.success
         case .ready: T3Colors.textTertiary
         }
+    }
+
+    private var canRunIOSApp: Bool {
+        appRuntime.availability() == .embedded
+            && isIOSAppProject
+            && !currentThread.isArchived
+    }
+
+    private var canRunWebsite: Bool {
+        websiteRunConfiguration != nil && !currentThread.isArchived
+    }
+
+    @MainActor
+    private func refreshRunCapabilities() async {
+        if appRuntime.availability() == .embedded {
+            if await FeatureIOSProjectDetector.hasIOSAppBuild(
+                client: model.client,
+                threadID: thread.id
+            ) {
+                isIOSAppProject = true
+            } else {
+                isIOSAppProject = await FeatureIOSProjectDetector.isIOSAppProject(
+                    client: model.client,
+                    threadID: thread.id
+                )
+            }
+        } else {
+            isIOSAppProject = false
+        }
+
+        if let resolver = model.client as? any FeatureWebsitePreviewResolving,
+           (try? resolver.canExposeWebsitePreview(threadID: thread.id)) == true {
+            let project = model.snapshot.projects.first { $0.id == currentThread.projectID }
+            websiteRunConfiguration = await FeatureWebsiteProjectDetector.configuration(
+                client: model.client,
+                threadID: thread.id,
+                project: project
+            )
+        } else {
+            websiteRunConfiguration = nil
+        }
+    }
+
+    private func pollIOSAppProjectUntilFound() async {
+        guard appRuntime.availability() == .embedded else { return }
+        for _ in 0 ..< 10 {
+            try? await Task.sleep(for: .seconds(2))
+            if isIOSAppProject { return }
+            if await FeatureIOSProjectDetector.isIOSAppProject(
+                client: model.client,
+                threadID: thread.id
+            ) {
+                isIOSAppProject = true
+                return
+            }
+        }
+    }
+
+    @MainActor
+    private func beginRun(_ target: FeatureRunTarget) {
+        guard runSession.task == nil, !runSession.activity.isBusy else {
+            runProgressPresented = true
+            return
+        }
+        runSession.phase = nil
+        runSession.message = nil
+        runSession.activity = .preparing(target)
+        runProgressPresented = true
+        let session = runSession
+        session.task = Task { @MainActor in
+            defer { session.task = nil }
+            switch target {
+            case .iosApp:
+                await runIOSAppFlow()
+            case .website:
+                await runWebsiteFlow()
+            }
+        }
+    }
+
+    @MainActor
+    private func retryRun() {
+        guard let target = runSession.activity.target else { return }
+        runSession.activity = .idle
+        beginRun(target)
+    }
+
+    @MainActor
+    private func dismissRunProgress() {
+        runProgressPresented = false
+        if runSession.activity.isFailure {
+            runSession.activity = .idle
+            runSession.phase = nil
+            runSession.message = nil
+        }
+    }
+
+    @MainActor
+    private func runIOSAppFlow() async {
+        guard canRunIOSApp else {
+            failRun(.iosApp, message: "This workspace does not contain a runnable iPhone app.")
+            return
+        }
+
+        let existingStatus = try? await readIOSBuildStatus()
+        if let status = existingStatus,
+           status.phase != "done" && status.phase != "failed",
+           let updatedAt = status.updatedAt,
+           Date().timeIntervalSince(updatedAt) <= 60 {
+            runSession.phase = status.phase
+            runSession.message = status.message
+                await buildAndRunIOSApp(startsNewBuild: false)
+            return
+        }
+
+        if let manifest = try? await loadIOSAppManifest(),
+           let status = existingStatus,
+           FeatureIOSAppBuildFreshness.canReuseArtifact(
+               buildPhase: status.phase,
+               builtAt: status.updatedAt,
+               thread: currentThread
+           ) {
+            do {
+                runSession.activity = .launchingIOS
+                runSession.message = "Preparing the existing build…"
+                let prepared = try await prepareArtifactChunksIfNeeded(manifest)
+                try await launchIOSApp(prepared)
+                completeRun()
+            } catch {
+                failRun(.iosApp, message: error.localizedDescription)
+            }
+            return
+        }
+
+        await buildAndRunIOSApp(startsNewBuild: true)
+    }
+
+    @MainActor
+    private func buildAndRunIOSApp(
+        startsNewBuild: Bool,
+        recoveryAttempt: Int = 0
+    ) async {
+        runSession.activity = .buildingIOS
+        if startsNewBuild {
+            runSession.phase = nil
+            runSession.message = "Starting the build…"
+        }
+        do {
+            guard let workspaceRoot = iosAppWorkspaceRoot else {
+                throw FeatureRunError.missingWorkspaceRoot
+            }
+            if startsNewBuild {
+                try await model.client.startIOSBuild(
+                    threadID: thread.id,
+                    workspaceRoot: workspaceRoot
+                )
+            }
+
+            let buildStartedAt = Date()
+            let deadline = Date().addingTimeInterval(30 * 60)
+            while Date() < deadline {
+                try Task.checkCancellation()
+                try await Task.sleep(for: .seconds(1))
+                guard let status = try? await readIOSBuildStatus() else { continue }
+                if status.phase != "done" && status.phase != "failed",
+                   let updatedAt = status.updatedAt,
+                   Date().timeIntervalSince(updatedAt) > 60,
+                   Date().timeIntervalSince(buildStartedAt) > 15 {
+                    throw FeatureRunError.buildFailed(
+                        "The build stopped responding. The server might have restarted."
+                    )
+                }
+                runSession.phase = status.phase
+                runSession.message = status.message
+                switch status.phase {
+                case "done":
+                    let builtManifest = try await loadIOSAppManifest()
+                    let manifest = try await prepareArtifactChunksIfNeeded(builtManifest)
+                    runSession.activity = .launchingIOS
+                    runSession.phase = nil
+                    runSession.message = "Installing the latest build…"
+                    try await launchIOSApp(manifest)
+                    completeRun()
+                    return
+                case "failed":
+                    if recoveryAttempt == 0, isRecoverableBuildFailure(status.message) {
+                        runSession.message = "The build runner restarted. Restarting automatically…"
+                        await buildAndRunIOSApp(startsNewBuild: true, recoveryAttempt: 1)
+                        return
+                    }
+                    throw FeatureRunError.buildFailed(status.message)
+                default:
+                    continue
+                }
+            }
+            throw FeatureRunError.buildTimedOut
+        } catch {
+            var message = error.localizedDescription
+            if message.contains("rejected the RPC request") {
+                message = "The connected server does not support iPhone builds. Restart or update it, then try again."
+            }
+            if recoveryAttempt == 0, isRecoverableBuildFailure(message) {
+                runSession.message = "The build runner restarted. Reconnecting automatically…"
+                await Task.yield()
+                await buildAndRunIOSApp(startsNewBuild: true, recoveryAttempt: 1)
+                return
+            }
+            failRun(.iosApp, message: message)
+        }
+    }
+
+    private func isRecoverableBuildFailure(_ message: String) -> Bool {
+        let normalized = message.lowercased()
+        return normalized.contains("server restarted")
+            || normalized.contains("build state was lost")
+            || normalized.contains("stopped responding")
+            || normalized.contains("stopped unexpectedly")
+            || normalized.contains("connection closed")
+            || normalized.contains("disconnected")
+    }
+
+    private var iosAppWorkspaceRoot: String? {
+        if let worktreePath = currentThread.worktreePath,
+           !worktreePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return worktreePath
+        }
+        return model.snapshot.projects.first { $0.id == currentThread.projectID }?.path
+    }
+
+    private func readIOSBuildStatus() async throws -> (
+        phase: String,
+        message: String,
+        updatedAt: Date?
+    ) {
+        let content = try await model.client.readFile(
+            threadID: thread.id,
+            path: ".t3/ios-build-status.json"
+        )
+        guard !content.isTruncated,
+              let data = content.text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FeatureRunError.invalidBuildStatus
+        }
+        let phase = object["phase"] as? String ?? ""
+        let message = object["message"] as? String ?? ""
+        let updatedAt = (object["updatedAt"] as? String).flatMap {
+            ISO8601DateFormatter().date(from: $0)
+        }
+        return (phase, message, updatedAt)
+    }
+
+    @MainActor
+    private func prepareArtifactChunksIfNeeded(
+        _ manifest: FeatureIOSAppManifest
+    ) async throws -> FeatureIOSAppManifest {
+        if let resolver = model.client as? any FeatureIOSAppArtifactResolving,
+           let url = try? await resolver.iosAppArtifactURL(
+               threadID: thread.id,
+               path: manifest.artifactPath
+           ),
+           url.scheme == "http" || url.scheme == "https" {
+            return manifest
+        }
+        if manifest.artifactChunks?.isEmpty == false {
+            return manifest
+        }
+        try await FeatureIOSAppWorkspaceCommand.createArtifactChunks(
+            client: model.client,
+            threadID: thread.id,
+            artifactPath: manifest.artifactPath
+        )
+        return try await loadIOSAppManifest()
+    }
+
+    @MainActor
+    private func launchIOSApp(_ manifest: FeatureIOSAppManifest) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                let artifactURL = try await self.iosAppArtifactURL(for: manifest)
+                if artifactURL.isFileURL {
+                    defer { try? FileManager.default.removeItem(at: artifactURL) }
+                    try await self.appRuntime.run(manifest, artifactURL)
+                } else {
+                    try await self.appRuntime.run(manifest, artifactURL)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(420))
+                throw FeatureAppRuntimeError.runtimeFailed(
+                    "The iPhone app did not start within 7 minutes. Check the signing certificate and try again."
+                )
+            }
+            _ = try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    @MainActor
+    private func iosAppArtifactURL(for manifest: FeatureIOSAppManifest) async throws -> URL {
+        if let resolver = model.client as? any FeatureIOSAppArtifactResolving,
+           let url = try? await resolver.iosAppArtifactURL(
+               threadID: thread.id,
+               path: manifest.artifactPath
+           ) {
+            return url
+        }
+        return try await reconstructIOSAppArtifact(manifest)
+    }
+
+    @MainActor
+    private func reconstructIOSAppArtifact(_ manifest: FeatureIOSAppManifest) async throws -> URL {
+        guard let chunks = manifest.artifactChunks, !chunks.isEmpty else {
+            throw FeatureIOSAppManifestError.invalidArtifactChunks
+        }
+        var artifact = Data()
+        for path in chunks {
+            let content = try await model.client.readFile(threadID: thread.id, path: path)
+            guard !content.isTruncated,
+                  let data = Data(base64Encoded: content.text, options: .ignoreUnknownCharacters) else {
+                throw FeatureIOSAppManifestError.invalidArtifactChunks
+            }
+            artifact.append(data)
+        }
+        guard !artifact.isEmpty else {
+            throw FeatureIOSAppManifestError.invalidArtifactChunks
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("t3-ios-artifact-\(UUID().uuidString).ipa")
+        try artifact.write(to: url, options: .atomic)
+        return url
+    }
+
+    private func loadIOSAppManifest() async throws -> FeatureIOSAppManifest {
+        let content = try await model.client.readFile(
+            threadID: thread.id,
+            path: FeatureIOSAppManifest.relativePath
+        )
+        guard !content.isTruncated else {
+            throw FeatureIOSAppManifestError.invalidJSON
+        }
+        return try FeatureIOSAppManifest(contents: content.text)
+    }
+
+    @MainActor
+    private func runWebsiteFlow() async {
+        guard let configuration = websiteRunConfiguration else {
+            failRun(.website, message: "This workspace does not contain a supported website.")
+            return
+        }
+        guard let resolver = model.client as? any FeatureWebsitePreviewResolving else {
+            failRun(.website, message: "The connected environment cannot expose website previews.")
+            return
+        }
+
+        runSession.activity = .startingWebsite
+        runSession.message = "Starting \(configuration.name)…"
+        do {
+            let previewURL = try resolver.websitePreviewURL(
+                threadID: thread.id,
+                localURL: configuration.localPreviewURL
+            )
+            let terminalID = "t3-run-website"
+            let exitMarker = "__T3_WEBSITE_EXIT_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
+            let existing = try? await model.client.terminalSnapshot(
+                threadID: thread.id,
+                terminalID: terminalID
+            )
+            if existing?.hasRunningSubprocess != true {
+                if await Self.websiteResponds(at: previewURL) {
+                    throw FeatureRunError.websitePortInUse(previewURL)
+                }
+                try await model.client.openTerminal(
+                    threadID: thread.id,
+                    terminalID: terminalID,
+                    columns: 100,
+                    rows: 30
+                )
+                try await model.client.writeTerminal(
+                    threadID: thread.id,
+                    terminalID: terminalID,
+                    data: "\(configuration.command); printf '\\n\(exitMarker)%s\\n' \"$?\"\r"
+                )
+            }
+            runSession.message = "Waiting for \(previewURL.host ?? "the website")…"
+            try await waitForWebsite(
+                at: previewURL,
+                terminalID: terminalID,
+                exitMarker: exitMarker
+            )
+            openURL(previewURL)
+            completeRun()
+        } catch {
+            failRun(.website, message: error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func waitForWebsite(
+        at url: URL,
+        terminalID: String,
+        exitMarker: String
+    ) async throws {
+        let terminalEvents = model.client.terminalEvents(
+            threadID: thread.id,
+            terminalID: terminalID
+        )
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for _ in 0 ..< 90 {
+                    try Task.checkCancellation()
+                    if await Self.websiteResponds(at: url) { return }
+                    try await Task.sleep(for: .seconds(1))
+                }
+                throw FeatureRunError.websiteTimedOut(url)
+            }
+            group.addTask {
+                for await terminal in terminalEvents {
+                    try Task.checkCancellation()
+                    if terminal.state == .failed || terminal.state == .exited {
+                        throw FeatureRunError.websiteCommandStopped(
+                            Self.terminalFailureDetail(terminal)
+                        )
+                    }
+                    if let exitCode = Self.websiteExitCode(
+                        in: terminal.buffer,
+                        marker: exitMarker
+                    ), exitCode != 0 {
+                        throw FeatureRunError.websiteCommandStopped(
+                            Self.terminalFailureDetail(terminal)
+                        )
+                    }
+                }
+                throw FeatureRunError.websiteCommandStopped("")
+            }
+            _ = try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    nonisolated private static func websiteResponds(at url: URL) async -> Bool {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let response = response as? HTTPURLResponse else { return false }
+        return (200 ..< 500).contains(response.statusCode)
+    }
+
+    nonisolated private static func websiteExitCode(
+        in buffer: String,
+        marker: String
+    ) -> Int? {
+        guard let markerRange = buffer.range(of: marker, options: .backwards) else {
+            return nil
+        }
+        return Int(buffer[markerRange.upperBound...].prefix { $0.isNumber || $0 == "-" })
+    }
+
+    nonisolated private static func terminalFailureDetail(
+        _ terminal: FeatureTerminalSnapshot
+    ) -> String {
+        let detail = terminal.error ?? terminal.buffer
+            .split(separator: "\n")
+            .suffix(4)
+            .joined(separator: "\n")
+        return detail.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @MainActor
+    private func completeRun() {
+        runSession.activity = .idle
+        runSession.phase = nil
+        runSession.message = nil
+        runProgressPresented = false
+    }
+
+    @MainActor
+    private func failRun(_ target: FeatureRunTarget, message: String) {
+        runSession.activity = .failed(target)
+        runSession.phase = "failed"
+        runSession.message = message
+        runProgressPresented = true
     }
 
     private func timeline(_ detail: FeatureThreadDetail) -> some View {
@@ -564,6 +1128,148 @@ private enum FeatureThreadToolSurface: String, Identifiable {
     case terminal
 
     var id: String { rawValue }
+}
+
+private enum FeatureRunError: LocalizedError {
+    case missingWorkspaceRoot
+    case invalidBuildStatus
+    case buildFailed(String)
+    case buildTimedOut
+    case websitePortInUse(URL)
+    case websiteCommandStopped(String)
+    case websiteTimedOut(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingWorkspaceRoot:
+            "This thread has no workspace root to build from."
+        case .invalidBuildStatus:
+            "The iPhone build status could not be read."
+        case let .buildFailed(message):
+            message.isEmpty
+                ? "The iPhone build failed. Check .t3/builds/xcodebuild.log."
+                : message
+        case .buildTimedOut:
+            "The iPhone build did not finish within 30 minutes."
+        case let .websitePortInUse(url):
+            "Another process already uses \(url.host ?? "the preview host") on port \(url.port ?? 80). Stop that process, then try again."
+        case let .websiteCommandStopped(detail):
+            detail.isEmpty
+                ? "The website command stopped before the website became available."
+                : "The website command stopped: \(detail)"
+        case let .websiteTimedOut(url):
+            "The website did not become reachable at \(url.absoluteString)."
+        }
+    }
+}
+
+private struct FeatureRunProgressView: View {
+    let activity: FeatureRunActivity
+    let phase: String?
+    let message: String?
+    let onRetry: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(T3Typography.threadHeading3)
+                        .foregroundStyle(T3Colors.textPrimary)
+                    Text(activity.isFailure ? "Run stopped" : "You can hide this panel while it continues")
+                        .font(T3Typography.supporting)
+                        .foregroundStyle(T3Colors.textTertiary)
+                }
+                Spacer()
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.body.weight(.semibold))
+                        .frame(width: T3Metrics.minimumTapTarget, height: T3Metrics.minimumTapTarget)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(T3Colors.textSecondary)
+                .accessibilityLabel(activity.isFailure ? "Dismiss" : "Hide progress")
+            }
+
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: activity.compactIcon)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(activity.isFailure ? T3Colors.danger : T3Colors.accent)
+                    .frame(width: 34)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(detailTitle)
+                        .font(T3Typography.supportingStrong)
+                        .foregroundStyle(T3Colors.textPrimary)
+                    if let detailMessage {
+                        Text(detailMessage)
+                            .font(T3Typography.supporting)
+                            .foregroundStyle(T3Colors.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if activity.isFailure {
+                HStack(spacing: 12) {
+                    Button("Dismiss", action: onDismiss)
+                        .buttonStyle(.bordered)
+                    Button("Retry", action: onRetry)
+                        .buttonStyle(.borderedProminent)
+                }
+            } else {
+                Button("Hide", action: onDismiss)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(T3Colors.background)
+    }
+
+    private var title: String {
+        switch activity.target {
+        case .iosApp: "Run iOS App"
+        case .website: "Run Website"
+        case nil: "Run"
+        }
+    }
+
+    private var detailTitle: String {
+        switch activity {
+        case .idle: "Ready"
+        case .preparing(.iosApp): "Checking the latest iPhone build"
+        case .preparing(.website): "Preparing the website"
+        case .buildingIOS: phaseLabel(phase)
+        case .launchingIOS: "Running on iPhone"
+        case .startingWebsite: "Starting the development server"
+        case .failed: "Run failed"
+        }
+    }
+
+    private var detailMessage: String? {
+        if let message, !message.isEmpty { return message }
+        switch activity {
+        case .buildingIOS: return "Xcode can take several minutes for a large app or game."
+        case .launchingIOS: return "Downloading, signing, and opening the app."
+        case .startingWebsite: return "Waiting for the local website to accept connections."
+        default: return nil
+        }
+    }
+
+    private func phaseLabel(_ phase: String?) -> String {
+        switch phase {
+        case "locating": "Locating the Xcode project"
+        case "scheme": "Reading Xcode schemes"
+        case "dependencies": "Resolving dependencies"
+        case "building": "Building with Xcode"
+        case "packaging": "Packaging the IPA"
+        case "manifest": "Writing the build manifest"
+        default: "Building the iPhone app"
+        }
+    }
 }
 
 /// Merges a stored draft with edits made while that draft was loading. Each

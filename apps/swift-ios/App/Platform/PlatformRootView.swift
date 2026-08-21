@@ -133,6 +133,12 @@ struct PlatformRootView: View {
     }
 
     private func handle(url: URL, letOnboardingConfirmConnection: Bool) {
+        // The embedded LiveContainer runtime owns these callbacks. They are not
+        // T3 navigation routes and must not surface a deep-link error.
+        if let scheme = url.scheme?.lowercased(),
+           ["t3code-livecontainer", "livecontainer", "livecontainer2", "livecontainer3", "liveprocess"].contains(scheme) {
+            return
+        }
         do {
             let route = try PlatformDeepLinkParser.parse(url)
             if case .connection = route,

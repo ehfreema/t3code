@@ -150,6 +150,31 @@ public enum FeatureIOSAppManifestError: LocalizedError, Equatable, Sendable {
     }
 }
 
+enum FeatureIOSAppBuildFreshness {
+    static func canReuseArtifact(
+        buildPhase: String,
+        builtAt: Date?,
+        thread: FeatureThread
+    ) -> Bool {
+        buildPhase == "done" && canReuseArtifact(builtAt: builtAt, thread: thread)
+    }
+
+    static func canReuseArtifact(builtAt: Date?, thread: FeatureThread) -> Bool {
+        guard let builtAt else { return false }
+        switch thread.state {
+        case .queued, .working, .monitoring, .waitingForApproval, .waitingForInput:
+            return false
+        case .idle, .failed, .completed:
+            break
+        }
+
+        if thread.workspaceChangeTrackingAvailable == true {
+            return thread.latestWorkspaceChangeAt.map { $0 <= builtAt } ?? true
+        }
+        return thread.latestTurnCompletedAt.map { $0 <= builtAt } ?? true
+    }
+}
+
 enum FeatureIOSAppBuildPrompt {
     static let visibleText = "Build and run this iPhone app. Follow the instructions in `\(FeatureIOSAppWorkspaceCommand.instructionPath)`."
 
@@ -158,7 +183,7 @@ enum FeatureIOSAppBuildPrompt {
 
     Package the resulting .app as an IPA with this layout: Payload/<AppName>.app. Put the IPA below .t3/builds/ in this thread's workspace. Verify that the archive contains Payload/<AppName>.app/Info.plist and an arm64 executable.
 
-    Encode the IPA into independently decodable 256 KiB binary chunks. For chunk index 0, write base64(IPA bytes 0..<262144) to `<artifactPath>.b64.0000.txt`; continue with zero-padded sequential indexes until every IPA byte is encoded. Remove stale chunk files first. Each text file must contain only the base64 for that binary chunk.
+    Encode the IPA into independently decodable 512 KiB binary chunks. For chunk index 0, write base64(IPA bytes 0..<524288) to `<artifactPath>.b64.0000.txt`; continue with zero-padded sequential indexes until every IPA byte is encoded. Remove stale chunk files first. Each text file must contain only the base64 for that binary chunk.
 
     After verification, write .t3/ios-app.json with exactly these fields:
     {

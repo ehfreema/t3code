@@ -49,6 +49,7 @@ public final class FeatureRootModel {
     private var outboxDrainTask: Task<Void, Never>?
     private var outboxRetryAttempt = 0
     private var outboxGeneration: UInt64 = 0
+    @ObservationIgnored private var runSessions: [String: FeatureRunSession] = [:]
 
     public init(
         client: any FeatureClient,
@@ -56,6 +57,13 @@ public final class FeatureRootModel {
     ) {
         self.client = client
         self.outboxStore = outboxStore
+    }
+
+    func runSession(for threadID: String) -> FeatureRunSession {
+        if let session = runSessions[threadID] { return session }
+        let session = FeatureRunSession()
+        runSessions[threadID] = session
+        return session
     }
 
     public func start() async {

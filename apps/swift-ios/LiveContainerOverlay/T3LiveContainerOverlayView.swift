@@ -159,10 +159,10 @@ struct T3LiveContainerOverlayView: View {
     @discardableResult
     private func requestCertificateImport() -> String? {
         let importURLString = "certificate?callback_template=t3code-livecontainer%3A%2F%2Fcertificate%3Fcert%3D%24%28BASE64_CERT%29%26password%3D%24%28PASSWORD%29"
-        // Try SideStore first, then AltStore (classic), mirroring the stock LiveContainer
+        // Try SideStore first, then AltStore, mirroring the stock LiveContainer
         // settings flow. The store is not detectable here (App Group Unknown), so both
-        // schemes are attempted.
-        let schemes = ["sidestore", "altstore-classic"]
+        // schemes are attempted. An unavailable scheme is ignored by the system.
+        let schemes = ["sidestore", "altstore", "altstore-classic"]
         for storeScheme in schemes {
             guard let url = URL(string: "\(storeScheme)://\(importURLString)") else { continue }
             let canOpen = UIApplication.shared.canOpenURL(url)

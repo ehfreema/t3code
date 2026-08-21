@@ -394,6 +394,12 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     if(!appBundle) {
         return @"App not found";
     }
+    // Some engines resolve loose game data from the current working directory.
+    // Match a normal app launch by making the guest bundle that directory.
+    if (bundlePath) {
+        chdir(bundlePath.UTF8String);
+        t3LaunchLog([NSString stringWithFormat:@"chdir to bundlePath: %@ (cwd=%s)", bundlePath, getcwd(NULL, 0) ?: "(null)"]);
+    }
     
     // find container in Info.plist
     NSString* dataUUID = selectedContainer;

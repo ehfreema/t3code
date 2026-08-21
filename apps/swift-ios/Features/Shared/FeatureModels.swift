@@ -122,6 +122,7 @@ public struct FeatureProject: Identifiable, Sendable, Equatable, Hashable, Codab
     public var threadCount: Int
     public var defaultSelection: FeatureSelection?
     public var repositoryIdentity: FeatureRepositoryIdentity?
+    public var scripts: [FeatureProjectScript]?
     public var createdAt: String?
     public var updatedAt: String?
 
@@ -134,6 +135,7 @@ public struct FeatureProject: Identifiable, Sendable, Equatable, Hashable, Codab
         threadCount: Int = 0,
         defaultSelection: FeatureSelection? = nil,
         repositoryIdentity: FeatureRepositoryIdentity? = nil,
+        scripts: [FeatureProjectScript]? = nil,
         createdAt: String? = nil,
         updatedAt: String? = nil
     ) {
@@ -145,8 +147,31 @@ public struct FeatureProject: Identifiable, Sendable, Equatable, Hashable, Codab
         self.threadCount = threadCount
         self.defaultSelection = defaultSelection
         self.repositoryIdentity = repositoryIdentity
+        self.scripts = scripts
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+public struct FeatureProjectScript: Identifiable, Sendable, Equatable, Hashable, Codable {
+    public let id: String
+    public var name: String
+    public var command: String
+    public var runOnWorktreeCreate: Bool
+    public var previewURL: String?
+
+    public init(
+        id: String,
+        name: String,
+        command: String,
+        runOnWorktreeCreate: Bool = false,
+        previewURL: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.command = command
+        self.runOnWorktreeCreate = runOnWorktreeCreate
+        self.previewURL = previewURL
     }
 }
 
@@ -220,6 +245,12 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
     public var attentionAt: Date?
     public var workingStartedAt: Date?
     public var latestTurnCompletedAt: Date?
+    /// The latest checkpoint that changed workspace files. Empty checkpoints
+    /// let Run ignore completed turns that did not modify the project.
+    public var latestWorkspaceChangeAt: Date?
+    /// Nil for shell snapshots and older cached models that do not include
+    /// checkpoint details. Those callers fall back to the latest turn time.
+    public var workspaceChangeTrackingAvailable: Bool?
     public var runtimeMode: FeatureRuntimeMode
     public var interactionMode: FeatureInteractionMode
 
@@ -255,6 +286,8 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
         attentionAt: Date? = nil,
         workingStartedAt: Date? = nil,
         latestTurnCompletedAt: Date? = nil,
+        latestWorkspaceChangeAt: Date? = nil,
+        workspaceChangeTrackingAvailable: Bool? = nil,
         runtimeMode: FeatureRuntimeMode = .fullAccess,
         interactionMode: FeatureInteractionMode = .standard
     ) {
@@ -289,6 +322,8 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
         self.attentionAt = attentionAt
         self.workingStartedAt = workingStartedAt
         self.latestTurnCompletedAt = latestTurnCompletedAt
+        self.latestWorkspaceChangeAt = latestWorkspaceChangeAt
+        self.workspaceChangeTrackingAvailable = workspaceChangeTrackingAvailable
         self.runtimeMode = runtimeMode
         self.interactionMode = interactionMode
     }

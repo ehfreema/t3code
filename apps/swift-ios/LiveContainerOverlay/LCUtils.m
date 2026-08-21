@@ -68,8 +68,10 @@
         return liveProcessBundle.bundleIdentifier;
     }
     
-    // in LC2, attempt to guess LC1's LiveProcess extension
-    NSString *bundleID = [NSString stringWithFormat:@"codes.t3.t3code-live.%@.LiveProcess", LCSharedUtils.teamIdentifier];
+    // In LC2, attempt to guess the extension from the current host identity. The
+    // embedded host is the T3 Code app itself, not a second LiveContainer app.
+    NSString *hostBundleID = NSBundle.mainBundle.bundleIdentifier ?: @"codes.t3.t3code-live";
+    NSString *bundleID = [NSString stringWithFormat:@"%@.%@.LiveProcess", hostBundleID, LCSharedUtils.teamIdentifier];
     if([NSExtension extensionWithIdentifier:bundleID error:nil]) {
         return bundleID;
     }
@@ -169,9 +171,10 @@
     // Keychain groups: the 128 T3 shared groups (as shown in Diagnose Entitlement File)
     // plus the guest's own identifier.
     NSMutableArray *keychainGroups = [NSMutableArray array];
+    NSString *hostBundleID = NSBundle.mainBundle.bundleIdentifier ?: @"codes.t3.t3code-live";
     for (int i = 0; i < 128; i++) {
-        NSString *group = (i == 0) ? [NSString stringWithFormat:@"%@.codes.t3.t3code-live.shared", teamId]
-                                   : [NSString stringWithFormat:@"%@.codes.t3.t3code-live.shared.%d", teamId, i];
+        NSString *group = (i == 0) ? [NSString stringWithFormat:@"%@.%@.shared", teamId, hostBundleID]
+                                   : [NSString stringWithFormat:@"%@.%@.shared.%d", teamId, hostBundleID, i];
         [keychainGroups addObject:group];
     }
     NSString *guestKeychainGroup = [NSString stringWithFormat:@"%@.%@", teamId, guestBundleId];
@@ -396,7 +399,8 @@
 }
 
 + (void)changeMainExecutableTo:(NSString *)exec error:(NSError **)error {
-    NSURL *infoPath = [LCSharedUtils.appGroupPath URLByAppendingPathComponent:@"LiveContainer/Applications/codes.t3.t3code-live.app/Info.plist"];
+    NSString *hostBundleID = NSBundle.mainBundle.bundleIdentifier ?: @"codes.t3.t3code-live";
+    NSURL *infoPath = [LCSharedUtils.appGroupPath URLByAppendingPathComponent:[NSString stringWithFormat:@"LiveContainer/Applications/%@.app/Info.plist", hostBundleID]];
     NSMutableDictionary *infoDict = [NSMutableDictionary dictionaryWithContentsOfURL:infoPath];
     if (!infoDict) return;
 

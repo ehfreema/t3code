@@ -8,6 +8,20 @@ import UIKit
 @Suite("Feature root model")
 struct FeatureRootModelTests {
     @Test
+    func runSessionPersistsAcrossThreadViewRecreation() {
+        let model = testRootModel(client: FeatureClientStub())
+        let first = model.runSession(for: "thread-1")
+        first.activity = .buildingIOS
+        first.message = "Building with Xcode"
+
+        let reopened = model.runSession(for: "thread-1")
+
+        #expect(first === reopened)
+        #expect(reopened.activity == .buildingIOS)
+        #expect(reopened.message == "Building with Xcode")
+    }
+
+    @Test
     func appearanceAppliesImmediatelyAndPersistsWithoutSavingTheDraft() async {
         let client = FeatureClientStub()
         let model = testRootModel(client: client)
