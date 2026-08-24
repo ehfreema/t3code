@@ -7,6 +7,7 @@ public struct ThreadDetailView: View {
     @SwiftUI.Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @SwiftUI.Environment(\.featureAppRuntime) private var appRuntime
     @SwiftUI.Environment(\.openURL) private var openURL
+    @SwiftUI.Environment(\.scenePhase) private var scenePhase
 
     @Bindable var model: FeatureRootModel
     let thread: FeatureThread
@@ -51,16 +52,18 @@ public struct ThreadDetailView: View {
 
     public var body: some View {
         Group {
-            if isLoading {
-                FeatureThreadOpeningView(isRefreshing: detail != nil)
-            } else if let detail {
+            if let detail {
                 timeline(detail)
+            } else if isLoading {
+                FeatureThreadOpeningView()
             } else {
-                ContentUnavailableView(
-                    "Thread unavailable",
-                    systemImage: "exclamationmark.bubble",
-                    description: Text("The thread could not be loaded.")
-                )
+                ContentUnavailableView {
+                    Label("Thread unavailable", systemImage: "exclamationmark.bubble")
+                } description: {
+                    Text("The thread could not be loaded.")
+                } actions: {
+                    Button("Retry", action: reloadThread)
+                }
             }
         }
         .background(T3Colors.background)
@@ -84,7 +87,7 @@ public struct ThreadDetailView: View {
         .task(id: thread.id) {
             let restoreBaseline = composerDraft
             let restoreKey = draftKey
-            isLoading = true
+            isLoading = detail == nil
             _ = await model.detail(for: thread.id, force: true)
             await restoreDraft(from: restoreBaseline, key: restoreKey)
             await refreshRunCapabilities()
@@ -100,27 +103,34 @@ public struct ThreadDetailView: View {
             guard state == .completed else { return }
             Task { await refreshRunCapabilities() }
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                persistDraftBeforeLeaving()
+            }
+        }
         .onDisappear {
             model.releaseThread(thread.id)
             persistDraftBeforeLeaving()
         }
         .sheet(item: $toolSurface) { surface in
             NavigationStack {
-                switch surface {
-                case .files:
-                    FeatureFilesView(client: model.client, threadID: thread.id)
-                case .review:
-                    FeatureReviewView(client: model.client, threadID: thread.id)
-                case .sourceControl:
-                    FeatureSourceControlView(client: model.client, threadID: thread.id)
-                case .terminal:
-                    FeatureTerminalView(client: model.client, threadID: thread.id)
+                Group {
+                    switch surface {
+                    case .files:
+                        FeatureFilesView(client: model.client, threadID: thread.id)
+                    case .review:
+                        FeatureReviewView(client: model.client, threadID: thread.id)
+                    case .sourceControl:
+                        FeatureSourceControlView(client: model.client, threadID: thread.id)
+                    case .terminal:
+                        FeatureTerminalView(client: model.client, threadID: thread.id)
+                    }
                 }
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") {
-                        toolSurface = nil
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") {
+                            toolSurface = nil
+                        }
                     }
                 }
             }
@@ -295,24 +305,7 @@ public struct ThreadDetailView: View {
                     }
                 }
             }
-            Section("Workspace") {
-                Button { browserPresented = true } label: {
-                    Label("Browser", systemImage: "safari")
-                }
-                Button { toolSurface = .files } label: {
-                    Label("Files", systemImage: "folder")
-                }
-                Button { toolSurface = .review } label: {
-                    Label("Review changes", systemImage: "doc.text.magnifyingglass")
-                }
-                Button { toolSurface = .sourceControl } label: {
-                    Label("Source Control", systemImage: "arrow.triangle.branch")
-                }
-                Button { toolSurface = .terminal } label: {
-                    Label("Terminal", systemImage: "terminal")
-                }
-            }
-            Section {
+            Section("Thread") {
                 if currentThread.supportsTitleRegeneration == true {
                     Button {
                         Task { await model.regenerateThreadTitle(thread.id) }
@@ -335,14 +328,39 @@ public struct ThreadDetailView: View {
                         )
                     }
                 }
-                Button {
-                    Task {
-                        _ = await model.detail(for: thread.id, force: true)
-                        await refreshRunCapabilities()
+                if currentThread.canSettleNow, !currentThread.isArchived {
+                    let isSettled = currentThread.isEffectivelySettled(at: .now)
+                    Button {
+                        Task { await model.setSettled(thread.id, settled: !isSettled) }
+                    } label: {
+                        Label(
+                            isSettled ? "Reopen" : "Settle",
+                            systemImage: isSettled ? "arrow.counterclockwise" : "checkmark"
+                        )
                     }
-                } label: {
+                }
+                Button(action: reloadThread) {
                     Label("Reload", systemImage: "arrow.clockwise")
                 }
+            }
+            Section("Workspace") {
+                Button { browserPresented = true } label: {
+                    Label("Browser", systemImage: "safari")
+                }
+                Button { toolSurface = .files } label: {
+                    Label("Files", systemImage: "folder")
+                }
+                Button { toolSurface = .review } label: {
+                    Label("Review changes", systemImage: "doc.text.magnifyingglass")
+                }
+                Button { toolSurface = .sourceControl } label: {
+                    Label("Source control", systemImage: "arrow.triangle.branch")
+                }
+                Button { toolSurface = .terminal } label: {
+                    Label("Terminal", systemImage: "terminal")
+                }
+            }
+            Section {
                 Button {
                     Task {
                         await model.setArchived(thread.id, archived: !currentThread.isArchived)
@@ -364,6 +382,17 @@ public struct ThreadDetailView: View {
         .buttonStyle(.plain)
         .foregroundStyle(T3Colors.textSecondary)
         .accessibilityLabel("Thread actions")
+        .accessibilityHint("Shows thread actions and workspace tools")
+        .accessibilityIdentifier("thread-actions-menu")
+    }
+
+    private func reloadThread() {
+        isLoading = detail == nil
+        Task {
+            _ = await model.detail(for: thread.id, force: true)
+            await refreshRunCapabilities()
+            isLoading = false
+        }
     }
 
     private var runActivityButton: some View {
@@ -1168,13 +1197,11 @@ public struct ThreadDetailView: View {
 }
 
 private struct FeatureThreadOpeningView: View {
-    let isRefreshing: Bool
-
     var body: some View {
         VStack(spacing: 12) {
             ProgressView()
                 .controlSize(.regular)
-            Text(isRefreshing ? "Refreshing thread…" : "Loading thread…")
+            Text("Loading thread…")
                 .font(T3Typography.supporting)
                 .foregroundStyle(T3Colors.textSecondary)
         }
@@ -2197,10 +2224,6 @@ private struct ThreadBackSwipeGestureView: UIViewRepresentable {
 
         required init?(coder: NSCoder) {
             fatalError("init(coder:) has not been implemented")
-        }
-
-        deinit {
-            uninstallGesture()
         }
 
         override func didMoveToWindow() {

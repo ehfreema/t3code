@@ -37,8 +37,10 @@ public struct WorkspaceView: View {
     @State private var showingNewTask = false
     @State private var newTaskInitialProjectID: String?
     @State private var showingAddProject = false
+    @State private var showingEnvironments = false
     @State private var showingSettings = false
     @State private var renamingThread: FeatureThread?
+    @State private var deletingThread: FeatureThread?
     @State private var renameTitle = ""
     @State private var sidebarBoundaryNow = Date.now
     @State private var preferredCompactColumn = NavigationSplitViewColumn.sidebar
@@ -139,6 +141,19 @@ public struct WorkspaceView: View {
         .sheet(isPresented: $showingAddProject) {
             AddProjectView(model: model)
         }
+        .sheet(isPresented: $showingEnvironments) {
+            NavigationStack {
+                ConnectionsView(model: model)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showingEnvironments = false }
+                        }
+                    }
+            }
+            .presentationDragIndicator(.visible)
+            .onAppear { model.setConnectionManagementPresented(true) }
+            .onDisappear { model.setConnectionManagementPresented(false) }
+        }
         .sheet(isPresented: $showingSettings) {
             SettingsView(model: model)
         }
@@ -158,6 +173,22 @@ public struct WorkspaceView: View {
                 Task { await model.renameThread(thread.id, title: title) }
             }
             .disabled(renameTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .alert(
+            "Delete thread?",
+            isPresented: Binding(
+                get: { deletingThread != nil },
+                set: { if !$0 { deletingThread = nil } }
+            ),
+            presenting: deletingThread
+        ) { thread in
+            Button("Delete", role: .destructive) {
+                deletingThread = nil
+                Task { await model.deleteThread(thread.id) }
+            }
+            Button("Cancel", role: .cancel) { deletingThread = nil }
+        } message: { thread in
+            Text("\"\(thread.title)\" and its terminal history will be permanently deleted.")
         }
         .onChange(of: selectedThreadIsAvailable) { _, isAvailable in
             if !isAvailable { closeSelectedThread() }
@@ -256,7 +287,7 @@ public struct WorkspaceView: View {
                     Task { await model.setPinned(thread.id, pinned: pinned) }
                 },
                 onDelete: { thread in
-                    Task { await model.deleteThread(thread.id) }
+                    deletingThread = thread
                 }
             )
         }
@@ -341,27 +372,25 @@ public struct WorkspaceView: View {
     @ViewBuilder
     private var connectionBrand: some View {
         if !unreachableEnvironments.isEmpty {
-            HStack(spacing: 7) {
-                Image(systemName: "network.slash")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(unreachableBrandLabel)
-                    .lineLimit(2)
-                    .font(.system(size: 13, weight: .semibold))
-                Button("Reconnect") {
-                    Task { await model.reload() }
+            Button { showingEnvironments = true } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "network.slash")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(unreachableBrandLabel)
+                        .lineLimit(1)
+                        .font(.system(size: 13, weight: .semibold))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
                 }
-                .font(.caption.weight(.bold))
-                .buttonStyle(.plain)
-                .padding(.horizontal, 9)
-                .frame(height: 26)
-                .overlay {
-                    Capsule().stroke(T3Colors.danger.opacity(0.42), lineWidth: 1)
-                }
+                .frame(minHeight: T3Metrics.minimumTapTarget)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .foregroundStyle(T3Colors.danger)
-            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(unreachableBrandLabel). Manage environments")
+            .accessibilityIdentifier("sidebar-environments-button")
         } else if let reconnecting = reconnectingEnvironments.first {
-            Button { showingSettings = true } label: {
+            Button { showingEnvironments = true } label: {
                 HStack(spacing: 7) {
                     Image(systemName: "wifi.exclamationmark")
                         .font(.system(size: 13, weight: .semibold))
@@ -373,21 +402,33 @@ public struct WorkspaceView: View {
                 }
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(T3Colors.warning)
+                .frame(minHeight: T3Metrics.minimumTapTarget)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(reconnecting.name) reconnecting")
+            .accessibilityLabel("\(reconnecting.name) reconnecting. Manage environments")
+            .accessibilityIdentifier("sidebar-environments-button")
         } else {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("T3")
-                    .fontWeight(.bold)
-                    .foregroundStyle(T3Colors.textPrimary)
-                Text("Code")
-                    .fontWeight(.medium)
-                    .foregroundStyle(T3Colors.textSecondary)
+            Button { showingEnvironments = true } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("T3")
+                        .fontWeight(.bold)
+                        .foregroundStyle(T3Colors.textPrimary)
+                    Text("Code")
+                        .fontWeight(.medium)
+                        .foregroundStyle(T3Colors.textSecondary)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(T3Colors.textTertiary)
+                        .padding(.leading, 2)
+                }
+                .font(.system(size: 16))
+                .frame(minHeight: T3Metrics.minimumTapTarget)
+                .contentShape(Rectangle())
             }
-            .font(.system(size: 16))
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("T3 Code")
+            .buttonStyle(.plain)
+            .accessibilityLabel("T3 Code. Manage environments")
+            .accessibilityIdentifier("sidebar-environments-button")
         }
     }
 
@@ -528,9 +569,9 @@ public struct WorkspaceView: View {
 
     private var unreachableBrandLabel: String {
         if unreachableEnvironments.count == 1 {
-            return "\(unreachableEnvironments[0].name) unreachable"
+            return "\(unreachableEnvironments[0].name) offline"
         }
-        return "\(unreachableEnvironments.count) devices unreachable"
+        return "\(unreachableEnvironments.count) environments offline"
     }
 
     private var nextSidebarBoundary: Date? {
@@ -608,6 +649,7 @@ public struct WorkspaceView: View {
     private func dismissTransientPresentations() {
         showingNewTask = false
         showingAddProject = false
+        showingEnvironments = false
         showingSettings = false
         renamingThread = nil
     }
