@@ -4,6 +4,42 @@ import Testing
 
 @Suite("Web V2 home thread metadata")
 struct HomeThreadMetadataTests {
+    @Test
+    func providerAccountBadgesUseTheSessionAndOwningEnvironment() throws {
+        var personal = FeatureProvider(id: "codex", name: "Personal", driver: "codex")
+        personal.accentColor = " #12aBcD "
+        let work = FeatureProvider(id: "work", name: "Work Account", driver: "codex")
+        let otherComputer = FeatureProvider(id: "codex", name: "Codex", driver: "codex")
+        var snapshot = FeatureSnapshot(
+            threads: [
+                FeatureThread(id: "one", projectID: "p", environmentID: "one", title: "One", providerID: "codex"),
+                FeatureThread(id: "session", projectID: "p", environmentID: "one", title: "Session",
+                              providerID: "codex", sessionProviderID: "work"),
+                FeatureThread(id: "two", projectID: "p", environmentID: "two", title: "Two", providerID: "codex"),
+            ],
+            providersByEnvironment: ["one": [personal, work], "two": [otherComputer]]
+        )
+        let contexts = HomeThreadRowContext.index(snapshot: snapshot)
+        #expect(contexts["one"]?.providerBadge == ProviderAccountBadge(initials: "PE", accentColor: "#12aBcD"))
+        #expect(contexts["session"]?.providerName == "Work Account")
+        #expect(contexts["session"]?.providerBadge?.initials == "WA")
+        #expect(contexts["two"]?.providerBadge == nil)
+
+        personal.accentColor = "invalid"
+        snapshot.providersByEnvironment?["one"] = [personal]
+        #expect(HomeThreadRowContext.index(snapshot: snapshot)["one"]?.providerBadge == nil)
+    }
+
+    @Test
+    func providerInstanceNamesMatchTheSharedClientRules() {
+        #expect(ProviderInstanceDisplay.name(instanceID: "codex", driver: "codex", displayName: nil) == "Codex")
+        #expect(ProviderInstanceDisplay.name(instanceID: "codex_personal", driver: "codex", displayName: "Codex") == "Codex Personal")
+        #expect(ProviderInstanceDisplay.name(instanceID: "myWorkAccount", driver: "codex", displayName: nil) == "My Work Account")
+        #expect(ProviderInstanceDisplay.name(instanceID: "claudeAgent", driver: "claudeAgent", displayName: nil) == "Claude")
+        #expect(ProviderInstanceDisplay.initials("👩🏽‍💻 Team") == "👩🏽‍💻T")
+        #expect(ProviderInstanceDisplay.accentColor("#fff") == nil)
+    }
+
     private let now = Date(timeIntervalSince1970: 10_000)
 
     @Test
@@ -138,6 +174,109 @@ struct HomeThreadMetadataTests {
         #expect(monitoring.homeStatusAccessibilityLabel(at: now) == "Monitoring")
         #expect(!idle.hasLiveWorkingDuration)
         #expect(idle.homeStatusAccessibilityLabel(at: now) == "Ready")
+    }
+
+    @Test
+    func completedRowsShowABareAgeMeasuredFromCompletion() {
+        let thread = FeatureThread(
+            id: "completed",
+            projectID: "project",
+            title: "Done task",
+            updatedAt: now.addingTimeInterval(-60),
+            state: .completed,
+            latestTurnCompletedAt: now.addingTimeInterval(-9_360)
+        )
+
+        #expect(thread.homeDoneDuration(at: now) == "2h 36m")
+        #expect(thread.homeRowStatusLabel(at: now) == "2h 36m")
+        #expect(
+            thread.homeRowAccessibilityStatus(rich: true, at: now)
+                == "Completed 2 hours, 36 minutes ago"
+        )
+        #expect(thread.homeRowAccessibilityStatus(rich: false, at: now) == "Done")
+    }
+
+    @Test
+    func doneDurationsAreMinuteGranularAndClampFutureCompletions() {
+        #expect(doneDuration(completedAtOffset: 30) == "now")
+        #expect(doneDuration(completedAtOffset: -30) == "now")
+        #expect(doneDuration(completedAtOffset: -59) == "now")
+        #expect(doneDuration(completedAtOffset: -60) == "1m")
+        #expect(doneDuration(completedAtOffset: -3_600) == "1h 0m")
+        #expect(doneDuration(completedAtOffset: -5_465) == "1h 31m")
+        #expect(doneDuration(completedAtOffset: -86_400) == "1d 0h")
+        #expect(doneDuration(completedAtOffset: -273_600) == "3d 4h")
+        #expect(doneDuration(completedAtOffset: -604_800) == "1w")
+        #expect(doneDuration(completedAtOffset: -31_449_600) == "52w")
+        #expect(doneDuration(completedAtOffset: -31_536_000) == "1y")
+        #expect(doneDuration(completedAtOffset: -63_072_000) == "2y")
+    }
+
+    @Test
+    func doneAccessibilityLabelsSpeakTheAgeInWords() {
+        #expect(doneAccessibilityLabel(completedAtOffset: -30) == "Completed just now")
+        #expect(doneAccessibilityLabel(completedAtOffset: -60) == "Completed 1 minute ago")
+        #expect(doneAccessibilityLabel(completedAtOffset: -120) == "Completed 2 minutes ago")
+        #expect(doneAccessibilityLabel(completedAtOffset: -3_600) == "Completed 1 hour ago")
+        #expect(
+            doneAccessibilityLabel(completedAtOffset: -9_360) == "Completed 2 hours, 36 minutes ago"
+        )
+        #expect(doneAccessibilityLabel(completedAtOffset: -86_400) == "Completed 1 day ago")
+        #expect(
+            doneAccessibilityLabel(completedAtOffset: -273_600) == "Completed 3 days, 4 hours ago"
+        )
+        #expect(doneAccessibilityLabel(completedAtOffset: -604_800) == "Completed 1 week ago")
+        #expect(doneAccessibilityLabel(completedAtOffset: -31_449_600) == "Completed 52 weeks ago")
+        #expect(doneAccessibilityLabel(completedAtOffset: -31_536_000) == "Completed 1 year ago")
+        #expect(doneAccessibilityLabel(completedAtOffset: -63_072_000) == "Completed 2 years ago")
+    }
+
+    @Test
+    func onlyCompletedThreadsWithACompletionTimeShowADoneDuration() {
+        let completedWithoutTime = FeatureThread(
+            id: "completed",
+            projectID: "project",
+            title: "Done task",
+            updatedAt: now.addingTimeInterval(-120),
+            state: .completed
+        )
+        let working = FeatureThread(
+            id: "working",
+            projectID: "project",
+            title: "Working task",
+            state: .working,
+            latestTurnCompletedAt: now.addingTimeInterval(-300)
+        )
+
+        #expect(completedWithoutTime.homeDoneDuration(at: now) == nil)
+        #expect(completedWithoutTime.homeDoneAccessibilityLabel(at: now) == nil)
+        #expect(completedWithoutTime.homeRowStatusLabel(at: now) == "2m")
+        #expect(
+            completedWithoutTime.homeRowAccessibilityStatus(rich: true, at: now)
+                == "Done. Updated 2 minutes ago"
+        )
+        #expect(completedWithoutTime.homeRowAccessibilityStatus(rich: false, at: now) == "Done")
+        #expect(working.homeDoneDuration(at: now) == nil)
+        #expect(working.homeRowStatusLabel(at: now) == "Working")
+    }
+
+    private func doneDuration(completedAtOffset: TimeInterval) -> String? {
+        completedThread(completedAtOffset: completedAtOffset).homeDoneDuration(at: now)
+    }
+
+    private func doneAccessibilityLabel(completedAtOffset: TimeInterval) -> String? {
+        completedThread(completedAtOffset: completedAtOffset)
+            .homeDoneAccessibilityLabel(at: now)
+    }
+
+    private func completedThread(completedAtOffset: TimeInterval) -> FeatureThread {
+        FeatureThread(
+            id: "completed",
+            projectID: "project",
+            title: "Done task",
+            state: .completed,
+            latestTurnCompletedAt: now.addingTimeInterval(completedAtOffset)
+        )
     }
 
     private func accessibilityDuration(startedAtOffset: TimeInterval) -> String {
@@ -323,5 +462,246 @@ struct HomeThreadMetadataTests {
         let context = try #require(HomeThreadRowContext.index(snapshot: snapshot)[thread.id])
 
         #expect(context.projectName == "pingdotgg/t3code")
+    }
+
+    @Test
+    func fallbackRowContextDoesNotOfferPlaceholderProjectCopy() {
+        let thread = FeatureThread(
+            id: "thread",
+            projectID: "missing-project",
+            title: "Unresolved project"
+        )
+
+        let actions = ThreadCopyModel.actions(
+            for: thread,
+            context: HomeThreadRowContext.fallback.copyContext
+        )
+
+        #expect(actions.contains { $0.kind == .project } == false)
+    }
+
+    @Test
+    func rowContextFallsBackToProjectEnvironmentForBlankThreadEnvironment() throws {
+        let thread = FeatureThread(
+            id: "thread",
+            projectID: "project",
+            environmentID: "  ",
+            title: "Blank environment"
+        )
+        let snapshot = FeatureSnapshot(
+            environments: [
+                FeatureEnvironment(
+                    id: "device",
+                    name: "Desk Mac",
+                    endpoint: "http://device",
+                    connectionState: .connected
+                ),
+            ],
+            projects: [
+                FeatureProject(
+                    id: "project",
+                    environmentID: "device",
+                    name: "t3code",
+                    path: "/work/t3code"
+                ),
+            ],
+            threads: [thread]
+        )
+
+        let context = try #require(HomeThreadRowContext.index(snapshot: snapshot)[thread.id])
+
+        #expect(context.environmentLabel == "Desk Mac")
+        #expect(context.copyContext.environmentID == "device")
+    }
+
+    @Test
+    func pullRequestIndicatorsUseTheCurrentThreadBranchAndPreserveTheirState() {
+        let thread = FeatureThread(
+            id: "thread",
+            projectID: "project",
+            title: "Add native PR indicators",
+            branch: "feature/native-pull-requests"
+        )
+
+        for state in ["open", "merged", "closed"] {
+            let status = FeatureSourceControlStatus(
+                branch: "feature/native-pull-requests",
+                pullRequest: FeaturePullRequest(
+                    number: 42,
+                    title: "Add native PR indicators",
+                    state: state,
+                    updatedAt: "2026-08-28T12:30:45.123Z"
+                )
+            )
+
+            let presentation = HomeThreadPullRequestPresentation.resolve(
+                thread: thread,
+                status: status
+            )
+
+            #expect(presentation?.label == "#42")
+            #expect(presentation?.state.rawValue == state)
+            #expect(presentation?.updatedAt != nil)
+            #expect(presentation?.accessibilityLabel == "Pull request #42, \(state)")
+        }
+
+        let wholeSecond = FeatureSourceControlStatus(
+            branch: thread.branch,
+            pullRequest: FeaturePullRequest(
+                number: 42,
+                title: "Add native PR indicators",
+                state: "merged",
+                updatedAt: "2026-08-28T12:30:45Z"
+            )
+        )
+        #expect(HomeThreadPullRequestPresentation.resolve(
+            thread: thread,
+            status: wholeSecond
+        )?.updatedAt != nil)
+    }
+
+    @Test
+    func pullRequestIndicatorsIgnoreOtherBranchesAndUnknownStates() {
+        let thread = FeatureThread(
+            id: "thread",
+            projectID: "project",
+            title: "Task",
+            branch: "feature/current"
+        )
+        let otherBranch = FeatureSourceControlStatus(
+            branch: "feature/other",
+            pullRequest: FeaturePullRequest(number: 42, title: "Other work", state: "open")
+        )
+        let unsupportedState = FeatureSourceControlStatus(
+            branch: "feature/current",
+            pullRequest: FeaturePullRequest(number: 42, title: "Current work", state: "draft")
+        )
+        let branchless = FeatureThread(id: "branchless", projectID: "project", title: "Task")
+
+        #expect(HomeThreadPullRequestPresentation.resolve(thread: thread, status: otherBranch) == nil)
+        #expect(HomeThreadPullRequestPresentation.resolve(thread: thread, status: unsupportedState) == nil)
+        #expect(HomeThreadPullRequestPresentation.resolve(thread: branchless, status: otherBranch) == nil)
+    }
+
+    @Test
+    func threadMenuOpensDurablePullRequestURL() throws {
+        let linked = ThreadLinkedPullRequest(
+            projectId: "project-wire",
+            repository: "pingdotgg/t3code",
+            number: 5178,
+            url: "https://github.com/pingdotgg/t3code/pull/5178"
+        )
+        let thread = FeatureThread(
+            id: "thread",
+            projectID: "environment:project-wire",
+            environmentID: "studio",
+            environmentName: "Studio",
+            title: "Native client",
+            linkedPullRequest: linked
+        )
+
+        let destination = try #require(ThreadPullRequestDestination.resolve(
+            thread: thread,
+            branchPullRequest: nil
+        ))
+
+        #expect(destination.number == 5178)
+        #expect(destination.url.absoluteString == "https://github.com/pingdotgg/t3code/pull/5178")
+    }
+
+    @Test
+    func threadMenuOpensBranchPullRequestsWithoutADurableLink() throws {
+        let project = FeatureProject(
+            id: "scoped-project",
+            wireID: "project-wire",
+            environmentID: "studio",
+            name: "T3 Code",
+            path: "/work/t3code"
+        )
+        let thread = FeatureThread(
+            id: "thread",
+            projectID: project.id,
+            environmentID: "studio",
+            environmentName: "Studio",
+            title: "Native client",
+            branch: "feature/native"
+        )
+        let pullRequest = FeaturePullRequest(
+            number: 42,
+            title: "Native client",
+            state: "open",
+            url: URL(string: "https://github.com/pingdotgg/t3code/pull/42")
+        )
+
+        let destination = try #require(ThreadPullRequestDestination.resolve(
+            thread: thread,
+            branchPullRequest: pullRequest
+        ))
+
+        #expect(destination.number == 42)
+        #expect(destination.url == pullRequest.url)
+    }
+
+    @Test
+    func threadMenuRequiresPullRequestURL() throws {
+        let url = try #require(URL(string: "https://example.com/reviews/42"))
+        let thread = FeatureThread(id: "thread", projectID: "missing", title: "Task")
+        let pullRequest = FeaturePullRequest(number: 42, title: "Task", state: "open", url: url)
+
+        let destination = try #require(ThreadPullRequestDestination.resolve(
+            thread: thread,
+            branchPullRequest: pullRequest
+        ))
+
+        #expect(destination.url == url)
+        #expect(ThreadPullRequestDestination.resolve(
+            thread: thread,
+            branchPullRequest: nil
+        ) == nil)
+        #expect(ThreadPullRequestDestination.resolve(
+            thread: thread,
+            branchPullRequest: FeaturePullRequest(
+                number: 42,
+                title: "Task",
+                state: "open"
+            )
+        ) == nil)
+    }
+
+    @Test
+    func liveSourceControlSnapshotsCarryPullRequestsAndClearMissingRemoteState() {
+        let local = VCSLocalStatus(
+            isRepo: true,
+            sourceControlProvider: nil,
+            hasPrimaryRemote: true,
+            isDefaultRef: false,
+            refName: "feature/native-pull-requests",
+            hasWorkingTreeChanges: false,
+            workingTree: VCSWorkingTree(files: [], insertions: 0, deletions: 0)
+        )
+        let remote = VCSRemoteStatus(
+            hasUpstream: true,
+            aheadCount: 2,
+            behindCount: 1,
+            aheadOfDefaultCount: 2,
+            pr: VCSChangeRequest(
+                number: 42,
+                title: "Add native PR indicators",
+                url: "https://github.com/pingdotgg/t3code/pull/42",
+                baseRef: "main",
+                headRef: "feature/native-pull-requests",
+                state: "open"
+            )
+        )
+
+        let status = NativeWorkspaceMapper.sourceControl(local: local, remote: remote)
+        let withoutRemote = NativeWorkspaceMapper.sourceControl(local: local, remote: nil)
+
+        #expect(status.branch == "feature/native-pull-requests")
+        #expect(status.pullRequest?.number == 42)
+        #expect(status.pullRequest?.state == "open")
+        #expect(status.aheadCount == 2)
+        #expect(status.behindCount == 1)
+        #expect(withoutRemote.pullRequest == nil)
     }
 }

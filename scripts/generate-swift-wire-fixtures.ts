@@ -5,6 +5,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import {
+  ClientOrchestrationCommand,
+  ProviderConsumeResetCreditInput,
+  ProviderConsumeResetCreditResult,
+  ServerProviderResetCredits,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamItem,
   OrchestrationThreadDetailSnapshot,
@@ -39,6 +43,13 @@ const threadShell = {
   interactionMode: "default",
   branch: "main",
   worktreePath: null,
+  branchPullRequest: {
+    projectId: project.id,
+    repository: "fixture/repository",
+    number: 42,
+    url: "https://example.com/fixture/repository/pull/42",
+  },
+  activeOrderKey: "nm",
   latestTurn: null,
   createdAt: timestamp,
   updatedAt: timestamp,
@@ -107,6 +118,81 @@ const shellSnapshot = encodeShellSnapshot(decodeShellSnapshot(shellSnapshotInput
 const threadDetail = encodeThreadDetail(decodeThreadDetail(threadDetailInput));
 const serializeFixture = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 const fixtures = new Map<string, string>([
+  [
+    "question-attachment-command.json",
+    serializeFixture(
+      Schema.encodeSync(ClientOrchestrationCommand)(
+        Schema.decodeUnknownSync(ClientOrchestrationCommand)({
+          type: "thread.user-input.respond",
+          commandId: "command-fixture",
+          threadId: threadShell.id,
+          requestId: "question-fixture",
+          createdAt: timestamp,
+          answers: { scope: "Server and Web" },
+          attachmentsByQuestionId: {
+            scope: [
+              {
+                type: "image",
+                id: "attachment-fixture",
+                name: "screenshot.png",
+                mimeType: "image/png",
+                sizeBytes: 2,
+              },
+            ],
+          },
+        }),
+      ),
+    ),
+  ],
+  [
+    "hub-reset-credit-input.json",
+    serializeFixture(
+      Schema.encodeSync(ProviderConsumeResetCreditInput)(
+        Schema.decodeUnknownSync(ProviderConsumeResetCreditInput)({
+          sourceId: "hub-fixture",
+          accountId: "account-fixture",
+          creditId: "credit-fixture",
+        }),
+      ),
+    ),
+  ],
+  [
+    "hub-reset-credit-result.json",
+    serializeFixture(
+      Schema.encodeSync(ProviderConsumeResetCreditResult)(
+        Schema.decodeUnknownSync(ProviderConsumeResetCreditResult)({
+          outcome: "reset",
+          warning: "Could not clear the hub cooldown.",
+        }),
+      ),
+    ),
+  ],
+  [
+    "hub-reset-credits.json",
+    serializeFixture(
+      Schema.encodeSync(ServerProviderResetCredits)(
+        Schema.decodeUnknownSync(ServerProviderResetCredits)({
+          availableCount: 1,
+          nextCreditId: "credit-fixture",
+          nextExpiresAt: timestamp,
+        }),
+      ),
+    ),
+  ],
+  [
+    "question-dismiss-command.json",
+    serializeFixture(
+      Schema.encodeSync(ClientOrchestrationCommand)(
+        Schema.decodeUnknownSync(ClientOrchestrationCommand)({
+          type: "thread.user-input.dismiss",
+          commandId: "command-fixture",
+          threadId: threadShell.id,
+          requestId: "question-fixture",
+          createdAt: timestamp,
+        }),
+      ),
+    ),
+  ],
   ["shell-snapshot.json", serializeFixture(shellSnapshot)],
   ["thread-detail-snapshot.json", serializeFixture(threadDetail)],
   [
@@ -123,7 +209,7 @@ const fixtures = new Map<string, string>([
   ],
 ]);
 
-class StaleWireFixturesError extends Schema.TaggedErrorClass<StaleWireFixturesError>()(
+class StaleWireFixturesError extends Schema.TaggedError<StaleWireFixturesError>()(
   "StaleWireFixturesError",
   {
     staleFixtures: Schema.Array(Schema.String),
@@ -147,7 +233,7 @@ const generateSwiftWireFixtures = Effect.gen(function* () {
     if (check) {
       const current = yield* fs
         .readFileString(filePath)
-        .pipe(Effect.orElseSucceed(() => undefined));
+        .pipe(Effect.catch(() => Effect.succeed(undefined)));
       if (current !== contents) {
         yield* Effect.logError(`[swift-wire-fixtures] stale: ${name}`);
         staleFixtures.push(name);

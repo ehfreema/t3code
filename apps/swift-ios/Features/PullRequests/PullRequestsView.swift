@@ -22,7 +22,7 @@ struct FeaturePullRequestRow: Identifiable, Equatable {
 
 @MainActor
 @Observable
-private final class PullRequestsModel {
+final class PullRequestsModel {
     var rows: [FeaturePullRequestRow] = []
     private var allRows: [FeaturePullRequestRow] = []
     var environments: [FeaturePullRequestEnvironmentList] = []
@@ -36,10 +36,12 @@ private final class PullRequestsModel {
     var hostFilter: String?
     var projectFilter: String?
     var isLoading = false
+    var isLoadingMore = false
     var errorMessage: String?
 
     private let client: any FeatureClient
     private var loadGeneration: UInt64 = 0
+    private var loadedInput: PullRequestListInput?
 
     init(client: any FeatureClient) {
         self.client = client
@@ -49,6 +51,7 @@ private final class PullRequestsModel {
         loadGeneration &+= 1
         let generation = loadGeneration
         isLoading = true
+        isLoadingMore = false
         errorMessage = nil
         defer {
             if loadGeneration == generation {
@@ -63,32 +66,108 @@ private final class PullRequestsModel {
                 review: reviewFilter,
                 checks: checksFilter
             )
-            let result = try await client.pullRequestLists(
-                PullRequestListInput(
-                    state: state,
-                    involvement: involvement,
-                    filters: filters == PullRequestListFilters() ? nil : filters,
-                    query: trimmedQuery.isEmpty ? nil : trimmedQuery
-                )
+            let input = PullRequestListInput(
+                state: state,
+                involvement: involvement,
+                filters: filters == PullRequestListFilters() ? nil : filters,
+                query: trimmedQuery.isEmpty ? nil : trimmedQuery
             )
+            let result = try await client.pullRequestLists(input)
             guard !Task.isCancelled, loadGeneration == generation else { return }
+            loadedInput = input
             environments = result
-            var seenRowIDs = Set<String>()
-            allRows = result.flatMap { environment in
-                (environment.result?.entries ?? []).map {
-                    FeaturePullRequestRow(
-                        environmentID: environment.environmentID,
-                        environmentName: environment.environmentName,
-                        entry: $0
-                    )
-                }
-            }
-            .filter { seenRowIDs.insert($0.id).inserted }
-            .sorted { $0.entry.updatedAt > $1.entry.updatedAt }
-            applyLocalFilters()
+            updateRows()
         } catch {
             guard loadGeneration == generation, !(error is CancellationError) else { return }
             errorMessage = error.localizedDescription
+        }
+    }
+
+    var hasMorePages: Bool {
+        environments.contains { environment in
+            (environmentFilter == nil || environment.environmentID == environmentFilter)
+                && environment.result?.nextCursors.isEmpty == false
+        }
+    }
+
+    func loadMore() async {
+        guard !isLoading, !isLoadingMore, let loadedInput else { return }
+
+        let pending = environments.compactMap { environment -> (String, [String: String])? in
+            guard environmentFilter == nil || environment.environmentID == environmentFilter,
+                  let cursors = environment.result?.nextCursors,
+                  !cursors.isEmpty else {
+                return nil
+            }
+            return (environment.environmentID, cursors)
+        }
+        guard !pending.isEmpty else { return }
+
+        let generation = loadGeneration
+        isLoadingMore = true
+        defer {
+            if loadGeneration == generation {
+                isLoadingMore = false
+            }
+        }
+
+        for (environmentID, cursors) in pending {
+            guard !Task.isCancelled, loadGeneration == generation else { return }
+
+            let input = PullRequestListInput(
+                state: loadedInput.state,
+                involvement: loadedInput.involvement,
+                filters: loadedInput.filters,
+                projectId: loadedInput.projectId,
+                projectIds: loadedInput.projectIds,
+                host: loadedInput.host,
+                limit: loadedInput.limit,
+                cursors: cursors,
+                query: loadedInput.query
+            )
+
+            do {
+                let pages = try await client.pullRequestLists(
+                    input,
+                    environmentID: environmentID
+                )
+                guard !Task.isCancelled, loadGeneration == generation else { return }
+                guard let page = pages.first(where: { $0.environmentID == environmentID }),
+                      let index = environments.firstIndex(where: {
+                          $0.environmentID == environmentID
+                      }) else {
+                    continue
+                }
+
+                let previous = environments[index]
+                let result: PullRequestListResult? = if let pageResult = page.result {
+                    previous.result?.appending(pageResult) ?? pageResult
+                } else {
+                    previous.result
+                }
+                environments[index] = FeaturePullRequestEnvironmentList(
+                    environmentID: environmentID,
+                    environmentName: page.environmentName,
+                    result: result,
+                    errorMessage: page.errorMessage
+                )
+                updateRows()
+            } catch {
+                guard loadGeneration == generation,
+                      !(error is CancellationError),
+                      let index = environments.firstIndex(where: {
+                          $0.environmentID == environmentID
+                      }) else {
+                    return
+                }
+                let previous = environments[index]
+                environments[index] = FeaturePullRequestEnvironmentList(
+                    environmentID: environmentID,
+                    environmentName: previous.environmentName,
+                    result: previous.result,
+                    errorMessage: error.localizedDescription
+                )
+            }
         }
     }
 
@@ -119,6 +198,22 @@ private final class PullRequestsModel {
             result["\(row.environmentID):\(row.entry.projectId)"] = row.entry.projectTitle
         }
         return values.sorted { $0.value < $1.value }
+    }
+
+    private func updateRows() {
+        var seenRowIDs = Set<String>()
+        allRows = environments.flatMap { environment in
+            (environment.result?.entries ?? []).map {
+                FeaturePullRequestRow(
+                    environmentID: environment.environmentID,
+                    environmentName: environment.environmentName,
+                    entry: $0
+                )
+            }
+        }
+        .filter { seenRowIDs.insert($0.id).inserted }
+        .sorted { $0.entry.updatedAt > $1.entry.updatedAt }
+        applyLocalFilters()
     }
 }
 
@@ -332,6 +427,23 @@ public struct PullRequestsView: View {
                     )
                     .listRowBackground(Color.clear)
                 }
+
+                if model.hasMorePages {
+                    Button {
+                        Task { await model.loadMore() }
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if model.isLoadingMore {
+                                ProgressView()
+                            }
+                            Text(model.isLoadingMore ? "Loading more..." : "Load more")
+                            Spacer()
+                        }
+                    }
+                    .disabled(model.isLoading || model.isLoadingMore)
+                    .listRowBackground(Color.clear)
+                }
             }
             .listStyle(.plain)
             .refreshable { await model.load(invalidate: true) }
@@ -540,7 +652,7 @@ private enum PullRequestDetailTab: String, CaseIterable {
     case files = "Files"
 }
 
-private struct PullRequestDetailView: View {
+struct PullRequestDetailView: View {
     private struct PendingAction: Identifiable {
         let id = UUID()
         let action: PullRequestAction
@@ -549,7 +661,7 @@ private struct PullRequestDetailView: View {
     }
 
     @Bindable var rootModel: FeatureRootModel
-    let row: FeaturePullRequestRow
+    let target: FeaturePullRequestTarget
     @State private var model: PullRequestDetailModel
     @State private var tab: PullRequestDetailTab = .summary
     @State private var editor: PullRequestEditor?
@@ -559,9 +671,13 @@ private struct PullRequestDetailView: View {
     @State private var pendingAction: PendingAction?
 
     init(rootModel: FeatureRootModel, row: FeaturePullRequestRow) {
+        self.init(rootModel: rootModel, target: row.target)
+    }
+
+    init(rootModel: FeatureRootModel, target: FeaturePullRequestTarget) {
         self.rootModel = rootModel
-        self.row = row
-        _model = State(initialValue: PullRequestDetailModel(client: rootModel.client, target: row.target))
+        self.target = target
+        _model = State(initialValue: PullRequestDetailModel(client: rootModel.client, target: target))
     }
 
     var body: some View {
@@ -590,7 +706,7 @@ private struct PullRequestDetailView: View {
             }
         }
         .background(T3Colors.background)
-        .navigationTitle("#\(row.entry.number)")
+        .navigationTitle("#\(target.reference.number)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { actionMenu }
@@ -658,7 +774,7 @@ private struct PullRequestDetailView: View {
             HStack(spacing: 7) {
                 Label(detail.state.label, systemImage: detail.state.systemImage)
                     .foregroundStyle(detail.state.color)
-                Text("\(detail.repository) · \(row.environmentName)")
+                Text("\(detail.repository) · \(target.environmentName)")
                 Spacer()
                 Text("+\(detail.additions)").foregroundStyle(T3Colors.success)
                 Text("−\(detail.deletions)").foregroundStyle(T3Colors.danger)
@@ -766,8 +882,8 @@ private struct PullRequestDetailView: View {
 
     private func sendToAgent(_ line: PullRequestDiffLine, file: PullRequestDiffFile) {
         guard let project = rootModel.snapshot.projects.first(where: {
-            $0.environmentID == row.environmentID
-                && ($0.wireID ?? $0.id) == row.entry.projectId
+            $0.environmentID == target.environmentID
+                && ($0.wireID ?? $0.id) == target.reference.projectId
         }) else {
             notice = "The project for this pull request is not available on this computer."
             return
@@ -780,7 +896,7 @@ private struct PullRequestDetailView: View {
             return
         }
         let prompt = """
-        Please inspect and address this line from pull request #\(row.entry.number) in \(row.entry.repository).
+        Please inspect and address this line from pull request #\(target.reference.number) in \(target.reference.repository).
 
         File: \(file.path)
         Line: \(line.displayLineNumber)
@@ -1088,6 +1204,7 @@ private struct PullRequestFilesView: View {
                                                 .frame(minWidth: 500, alignment: .leading)
                                         }
                                         .font(T3Typography.code)
+                                        .t3CodeTextSize()
                                         .foregroundStyle(line.foreground)
                                         .padding(.vertical, 2)
                                         .background(line.background)

@@ -146,6 +146,7 @@ struct MarkdownRenderedTable: Equatable, @unchecked Sendable {
 
 indirect enum MarkdownRenderedBlock: Equatable, @unchecked Sendable {
     case paragraph(MarkdownRenderedInline)
+    case image(MarkdownImage)
     case heading(level: Int, inline: MarkdownRenderedInline)
     case unorderedList([MarkdownRenderedListItem])
     case orderedList(start: Int, items: [MarkdownRenderedListItem])
@@ -153,6 +154,7 @@ indirect enum MarkdownRenderedBlock: Equatable, @unchecked Sendable {
     case table(MarkdownRenderedTable)
     case codeBlock(language: String?, code: String, inline: MarkdownRenderedInline)
     case thematicBreak
+    case artifactTemplate(CodexArtifactTemplate)
 }
 
 /// Immutable render plans are safe to reuse every time SwiftUI reconstructs a message row.
@@ -359,6 +361,9 @@ final class MarkdownRenderCache: @unchecked Sendable {
                 guard let inline = renderInline(source, style: .body) else { return nil }
                 rendered = .paragraph(inline)
 
+            case let .image(image):
+                rendered = .image(image)
+
             case let .heading(level, source):
                 guard let inline = renderInline(source, style: .heading(level: level)) else {
                     return nil
@@ -387,6 +392,9 @@ final class MarkdownRenderCache: @unchecked Sendable {
             case let .codeBlock(language, code):
                 guard let inline = renderInline(code, style: .code) else { return nil }
                 rendered = .codeBlock(language: language, code: code, inline: inline)
+
+            case let .artifactTemplate(template):
+                rendered = .artifactTemplate(template)
 
             case .thematicBreak:
                 rendered = .thematicBreak
