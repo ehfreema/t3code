@@ -1,3 +1,9 @@
+import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { LinkBranchPullRequestButton } from "./pullRequest/LinkBranchPullRequestButton";
+import {
+  resolveThreadCurrentPullRequestLink,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
@@ -70,6 +76,7 @@ import {
 } from "react";
 import { useParams, useRouter } from "@tanstack/react-router";
 
+import { useRightPanelStore } from "../rightPanelStore";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -94,6 +101,10 @@ import { isMacPlatform } from "~/lib/utils";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
 import { readLocalApi } from "../localApi";
+import {
+  isSameSidebarThreadRef,
+  useSidebarPendingFileDropStore,
+} from "../sidebarPendingFileDropStore";
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
 import {
   buildSidebarProjectSnapshots,
@@ -155,7 +166,7 @@ import {
   resolveSidebarDropVerb,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
-  searchSidebarThreadsByTitle,
+  searchSidebarThreads,
   shouldCreateNewThreadInCurrentProject,
   shouldRecedeSidebarThread,
   resolveWorkingStartedAt,
@@ -181,9 +192,11 @@ import {
 import { SidebarDragLifecycle, SidebarPointerSensor } from "./Sidebar.pointer";
 import { createSidebarListMotion } from "./Sidebar.motion";
 import {
+  ThreadPullRequestBadgeControl,
+  ThreadPullRequestsMiniList,
   ThreadWorktreeIndicator,
   prStatusIndicator,
-  settledPrHoverColorClass,
+  resolveThreadPullRequestBadge,
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
   useLinkedThreadPullRequest,
@@ -195,6 +208,7 @@ import {
   type SnoozePreset,
 } from "./Sidebar.snooze";
 import { ProjectFavicon, type ProjectFaviconProject } from "./ProjectFavicon";
+import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
@@ -325,6 +339,7 @@ function SidebarThreadTooltip({
   terminalProcessCount: number;
 }) {
   const driverKind = providerEntry?.driverKind ?? null;
+  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
   return (
     <TooltipPopup
       side="right"
@@ -406,6 +421,11 @@ function SidebarThreadTooltip({
             </div>
           ) : null}
         </div>
+        {supportsMultiplePullRequests && thread.pullRequests.length > 0 ? (
+          <div className="border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
+            <ThreadPullRequestsMiniList pullRequests={thread.pullRequests} />
+          </div>
+        ) : null}
       </div>
     </TooltipPopup>
   );
@@ -980,6 +1000,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   onUnsnooze: (threadRef: ScopedThreadRef) => void;
   onUnpin: (threadRef: ScopedThreadRef) => void;
   onAcknowledgeWoke: (threadRef: ScopedThreadRef, visitedAt: string) => void;
+  /**
+   * External files dropped onto this row. The row highlights while the drag
+   * is over it; the callback opens the thread and hands the files to its
+   * composer. Absent when the sidebar cannot open server threads.
+   */
+  onFileDropThreads?: ((threadRef: ScopedThreadRef, files: File[]) => void) | undefined;
 }) {
   const {
     isRenaming,
@@ -987,6 +1013,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     onCommitRename,
     onContextMenu,
     onAcknowledgeWoke,
+    onFileDropThreads,
     onRenameTitleChange,
     onSettle,
     onSnooze,
@@ -1035,8 +1062,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const gitCwd = thread.worktreePath ?? props.project?.workspaceRoot ?? null;
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
     thread.environmentId,
-    thread.linkedPullRequest ?? thread.branchPullRequest,
+    thread.linkedPullRequest,
     leaseLiveStatus,
+    thread.pullRequests,
+    thread.branchPullRequest,
   );
   const gitStatus = useEnvironmentQuery(
     leaseLiveStatus && (thread.branch != null || thread.worktreePath !== null) && gitCwd !== null
@@ -1051,6 +1080,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     gitStatus.data,
   );
   const pr = linkedPullRequestStatus?.pr ?? null;
+  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
+  const currentLinkedPr = supportsMultiplePullRequests
+    ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
+    : null;
 
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
@@ -1144,7 +1177,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     currentGitBranch: visibleGitStatus?.refName ?? null,
   });
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
-  const settledPrHoverClass = pr ? settledPrHoverColorClass(pr.state, pr.isDraft) : undefined;
 
   const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
   const providerEntry = props.providerEntryByInstanceId.get(modelInstanceId) ?? null;
@@ -1224,6 +1256,27 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     },
     [isRenaming, onStartRename, thread.title, threadRef],
   );
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const fileDropHandlers = useMemo(
+    () =>
+      onFileDropThreads
+        ? makeWorkspaceFileDropHandlers({
+            setDragActive: setIsFileDragOver,
+            addFiles: (files) => {
+              onFileDropThreads(threadRef, files);
+            },
+          })
+        : null,
+    [onFileDropThreads, threadRef],
+  );
+  // A drop lands on a child or outside the window entirely, so dragend is
+  // the reset of last resort for the row's highlight.
+  useEffect(() => {
+    if (!isFileDragOver) return;
+    const clearFileDrag = () => setIsFileDragOver(false);
+    window.addEventListener("dragend", clearFileDrag);
+    return () => window.removeEventListener("dragend", clearFileDrag);
+  }, [isFileDragOver]);
   const renameCommittedRef = useRef(false);
   useEffect(() => {
     if (isRenaming) renameCommittedRef.current = false;
@@ -1306,17 +1359,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   }, [showSnoozeButton]);
   const handlePrClick = useCallback(
     (event: ReactMouseEvent<HTMLAnchorElement>) => {
-      if (!pr?.url) return;
+      const url = pr?.url ?? currentLinkedPr?.url;
+      if (!url) return;
       const openedInRightPanel = openPrLink(
         event,
-        pr.url,
+        url,
         openPullRequestsInRightPanel ? threadRef : undefined,
       );
       if (openedInRightPanel && openPullRequestsInRightPanel && !props.isActive) {
         onThreadActivate(threadRef);
       }
     },
-    [onThreadActivate, openPrLink, openPullRequestsInRightPanel, pr, props.isActive, threadRef],
+    [
+      onThreadActivate,
+      openPrLink,
+      openPullRequestsInRightPanel,
+      pr,
+      currentLinkedPr,
+      props.isActive,
+      threadRef,
+    ],
   );
 
   // All sidebar rows share one surface model. Live threads used to look
@@ -1325,6 +1387,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // content; surface is reserved for interaction (hover, multi-select, route).
   const rowSurfaceClassName = cn(
     "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md text-left outline-none select-none",
+    variantAction === "unsettle" && "[&:not(:hover):not(:focus-within)_*]:text-secondary-label/70",
     props.isActive
       ? "bg-sidebar-row-active text-sidebar-foreground"
       : isSelected
@@ -1338,6 +1401,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       !props.isActive &&
       !isSelected &&
       "opacity-70 transition-opacity hover:opacity-100",
+    isFileDragOver && "ring-1 ring-inset ring-primary/70",
+    // The hover tint must not clobber an active/selected row's own surface.
+    isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
     // The lifted row is an opaque card so the rows beneath it never show
     // through. The row tint is translucent in dark themes and the pointer
     // keeps the hover color applied, so both the tint and the solid sidebar
@@ -1404,7 +1470,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     : "text-foreground/90",
             )
           : cn(
-              "truncate group-hover/sidebar-row:text-foreground",
+              "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
               shouldRecede
                 ? "text-secondary-label/70"
                 : props.isActive || isWoke
@@ -1420,28 +1486,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     </span>
   );
 
-  // A real link so cmd/ctrl+click and middle-click open the host in the
-  // browser. A plain click still opens T3's pull request view.
+  // Stacks show their layer count; multiple unrelated links show their total count.
+  // Plain clicks open T3; individual PR links also support opening the host in a new tab.
+  const prBadgeShape = supportsMultiplePullRequests
+    ? resolveThreadPullRequestBadge(thread.pullRequests)
+    : null;
+  const handlePrStackClick = useCallback(() => {
+    useRightPanelStore.getState().open(threadRef, "pull-requests");
+    if (!props.isActive) onThreadActivate(threadRef);
+  }, [onThreadActivate, props.isActive, threadRef]);
   const prBadge =
-    prStatus && pr ? (
-      <a
-        href={pr.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={handlePrClick}
-        className={cn(
-          // Sidebar chrome follows the interface font; tabular digits keep the
-          // number from reflowing as PR states stream in.
-          "shrink-0 text-xs tabular-nums hover:underline",
-          variant === "slim" && variantAction === "unsettle"
-            ? cn("text-secondary-label transition-colors", settledPrHoverClass)
-            : prStatus.colorClass,
-        )}
-        aria-label={prStatus.tooltip}
-      >
-        #{pr.number}
-      </a>
+    prBadgeShape?.kind === "stack" || pr || currentLinkedPr ? (
+      <ThreadPullRequestBadgeControl
+        variant="underline"
+        badge={prBadgeShape}
+        number={pr?.number ?? currentLinkedPr?.number}
+        url={pr?.url ?? currentLinkedPr?.url}
+        status={prStatus}
+        onOpenStack={handlePrStackClick}
+        onOpenPullRequest={handlePrClick}
+      />
     ) : null;
   const terminalStatusIcon = terminalStatus ? (
     <span
@@ -1505,6 +1569,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       <li
         data-thread-item
         {...sortableRootProps}
+        {...(fileDropHandlers ?? {})}
         className={cn(
           // Matches the h-9 row so unrendered rows never shift the list when they paint.
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
@@ -1533,8 +1598,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             <span
               className={cn(
                 "shrink-0 transition-opacity",
-                !props.isActive &&
-                  "opacity-40 grayscale group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
+                (!props.isActive || variantAction === "unsettle") &&
+                  "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
               )}
             >
               {props.project ? <ProjectFavicon project={props.project} className="size-4" /> : null}
@@ -1552,6 +1617,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               remain visible AND clickable while the row is hovered. Only
               the time/jump label yields to the settle affordance. */}
             {prBadge}
+            {prBadge &&
+            variantAction !== "unsettle" &&
+            pr &&
+            (supportsMultiplePullRequests
+              ? visibleThreadPullRequests(thread.pullRequests).length === 0
+              : thread.linkedPullRequest == null) ? (
+              <LinkBranchPullRequestButton threadRef={threadRef} url={pr.url} />
+            ) : null}
             {sortable?.isDragging ? (
               dragDestination
             ) : (
@@ -1657,6 +1730,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     <li
       data-thread-item
       {...sortableRootProps}
+      {...(fileDropHandlers ?? {})}
       className={cn(
         // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
@@ -1851,10 +1925,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               )}
               {terminalStatusIcon}
               {prBadge}
+              {prBadge &&
+              pr &&
+              (supportsMultiplePullRequests
+                ? visibleThreadPullRequests(thread.pullRequests).length === 0
+                : thread.linkedPullRequest == null) ? (
+                <LinkBranchPullRequestButton threadRef={threadRef} url={pr.url} />
+              ) : null}
               {diff ? (
                 <span className="shrink-0 font-mono">
-                  <span className="text-emerald-600 dark:text-emerald-400">+{diff.insertions}</span>{" "}
-                  <span className="text-red-600 dark:text-red-400">−{diff.deletions}</span>
+                  <span className="text-diff-addition-foreground">+{diff.insertions}</span>{" "}
+                  <span className="text-diff-deletion-foreground">−{diff.deletions}</span>
                 </span>
               ) : null}
               <span
@@ -1919,8 +2000,13 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   resultId: string;
   onHighlight: () => void;
   onSelect: () => void;
+  onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
 }) {
   const { thread } = props;
+  const threadRef = useMemo(
+    () => scopeThreadRef(thread.environmentId, thread.id),
+    [thread.environmentId, thread.id],
+  );
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(
     props.isHighlighted || props.isRouteActive,
   );
@@ -1961,8 +2047,25 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
     threadId: thread.id,
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const fileDropHandlers = useMemo(
+    () =>
+      makeWorkspaceFileDropHandlers({
+        setDragActive: setIsFileDragOver,
+        addFiles: (files) => {
+          props.onFileDropThreads(threadRef, files);
+        },
+      }),
+    [props.onFileDropThreads, threadRef],
+  );
+  useEffect(() => {
+    if (!isFileDragOver) return;
+    const clearFileDrag = () => setIsFileDragOver(false);
+    window.addEventListener("dragend", clearFileDrag);
+    return () => window.removeEventListener("dragend", clearFileDrag);
+  }, [isFileDragOver]);
   return (
-    <li role="presentation" className="list-none">
+    <li role="presentation" className="list-none" {...fileDropHandlers}>
       <Tooltip>
         <TooltipTrigger
           render={
@@ -1988,6 +2091,8 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
                 props.isHighlighted || props.isRouteActive
                   ? "bg-sidebar-row-active text-sidebar-foreground"
                   : "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+                isFileDragOver && "ring-1 ring-inset ring-primary/70",
+                isFileDragOver && !props.isRouteActive && "bg-sidebar-row-hover",
               )}
             />
           }
@@ -2510,7 +2615,7 @@ export default function Sidebar() {
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads],
   );
   const threadSearchResults = useMemo(
-    () => searchSidebarThreadsByTitle(searchableThreads, threadSearchQuery),
+    () => searchSidebarThreads(searchableThreads, threadSearchQuery),
     [searchableThreads, threadSearchQuery],
   );
   const threadSearchResultOrderKey = threadSearchResults
@@ -2707,12 +2812,54 @@ export default function Sidebar() {
       if (isMobile) {
         setOpenMobile(false);
       }
-      void router.navigate({
+      return router.navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
       });
     },
     [clearSelection, isMobile, router, setOpenMobile, setSelectionAnchor],
+  );
+
+  // Dropping files on a row opens that thread and attaches the files there.
+  // The composer only accepts drops for its OWN thread, so when the row is
+  // not the open thread we stash the files and let ChatView hand them over
+  // once the navigation actually lands; if the route bounced (thread gone),
+  // nothing will consume them, so clear instead of surprising the user later.
+  const queuePendingFileDrop = useSidebarPendingFileDropStore((s) => s.queuePendingFileDrop);
+  const clearPendingFileDrop = useSidebarPendingFileDropStore((s) => s.clearPendingFileDrop);
+  const handleThreadFileDrop = useCallback(
+    async (threadRef: ScopedThreadRef, files: File[]) => {
+      // Queued, not replaced: a second drop before the thread opens keeps
+      // both files, and the id lets cleanup below touch only this drop.
+      const dropId = queuePendingFileDrop({ threadRef, files });
+      // Key match alone is not "already there": during draft promotion the
+      // resolved route key is the server thread while the URL is still the
+      // draft route, and its composer would swallow the drop then discard it.
+      const landedBefore =
+        router.buildLocation({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(threadRef),
+        }).pathname === router.state.location.pathname;
+      if (landedBefore) return;
+      try {
+        await navigateToThread(threadRef);
+        // A newer drop may have arrived while the navigation was in flight;
+        // clearing by id leaves those files untouched.
+        const landed =
+          router.buildLocation({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(threadRef),
+          }).pathname === router.state.location.pathname;
+        if (!landed) {
+          clearPendingFileDrop(dropId);
+        }
+      } catch {
+        // Navigation failed outright; nothing will consume this drop, but a
+        // newer drop for the same thread may still be deliverable.
+        clearPendingFileDrop(dropId);
+      }
+    },
+    [clearPendingFileDrop, navigateToThread, queuePendingFileDrop, router],
   );
 
   const navigateToDraft = useCallback(
@@ -4200,7 +4347,7 @@ export default function Sidebar() {
                     setActiveSearchResultIndex(0);
                   }}
                   onKeyDown={handleThreadSearchKeyDown}
-                  placeholder="Search"
+                  placeholder="Search threads or PRs"
                   aria-label="Search threads"
                   role="combobox"
                   aria-autocomplete="list"
@@ -4467,6 +4614,7 @@ export default function Sidebar() {
                         resultId={`sidebar-thread-search-result-${index}`}
                         onHighlight={() => setActiveSearchResultIndex(index)}
                         onSelect={() => selectThreadSearchResult(thread)}
+                        onFileDropThreads={handleThreadFileDrop}
                       />
                     );
                   })}
@@ -4612,6 +4760,7 @@ export default function Sidebar() {
                             onUnsnooze={attemptUnsnooze}
                             onUnpin={attemptUnpin}
                             onAcknowledgeWoke={acknowledgeWoke}
+                            onFileDropThreads={handleThreadFileDrop}
                           />
                         );
                       };
