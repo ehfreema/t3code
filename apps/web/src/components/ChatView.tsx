@@ -68,6 +68,7 @@ import {
   projectScriptRuntimeEnv,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { truncate } from "@t3tools/shared/String";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import {
@@ -194,6 +195,8 @@ import {
   useSidebarPendingFileDropStore,
 } from "../sidebarPendingFileDropStore";
 import {
+  browserMiniPlayerSource,
+  previewMiniPlayerSourceKey,
   selectThreadPreviewMiniPlayer,
   usePreviewMiniPlayerStore,
 } from "../previewMiniPlayerStore";
@@ -304,7 +307,6 @@ import {
   environmentServerConfigsAtom,
   primaryServerAvailableEditorsAtom,
   primaryServerKeybindingsAtom,
-  primaryServerSettingsAtom,
   serverEnvironment,
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
@@ -415,6 +417,12 @@ import {
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
   resolveDraftHeroState,
+  isPaintOnlyThreadTimeline,
+  peekHeldThreadTimeline,
+  peekRememberedThreadTimeline,
+  rememberReadyThreadTimeline,
+  resolveThreadSwitchTimeline,
+  timelineHasEphemeralPreviewUrls,
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
   resolveThreadMetadataUpdateForNextTurn,
@@ -560,6 +568,8 @@ const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
 const DiffPanel = lazy(() => import("./DiffPanel"));
+const selectAutoShowFloatingPreview = (settings: { browserAutoShowFloatingPreview: boolean }) =>
+  settings.browserAutoShowFloatingPreview;
 const DevicePanel = lazy(() =>
   import("./device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
@@ -1379,6 +1389,10 @@ function chatActionErrorMessage(error: unknown): string {
 }
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
+const EMPTY_HELD_TURN_DIFF_SUMMARIES: readonly never[] = [];
+const noopHeldTurnDiff = (_turnId: TurnId, _filePath?: string) => {};
+const noopHeldRevert = (_targetTurnCount: number) => {};
+const noopHeldAttachment = (_attachment: ChatFileAttachment) => {};
 
 /**
  * Drops the send-time anchored end space. That space is what holds a sent
@@ -1506,7 +1520,6 @@ export default function ChatView(props: ChatViewProps) {
   }, [routeKind, routeThreadRef, routeThreadState]);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
   const settings = useEnvironmentSettings(environmentId);
-  const primaryServerSettings = useAtomValue(primaryServerSettingsAtom);
   const setStickyComposerModelSelection = useComposerDraftStore(
     (store) => store.setStickyModelSelection,
   );
@@ -1681,8 +1694,6 @@ export default function ChatView(props: ChatViewProps) {
     [],
   );
   const [composerOverlayElement, setComposerOverlayElement] = useState<HTMLDivElement | null>(null);
-  const [composerOverlayHeight, setComposerOverlayHeight] = useState(0);
-  const composerOverlayHeightRef = useRef(0);
   // Space the timeline keeps clear above its end. Tracks the overlay while the
   // composer is expanded and holds that height while it rests, so the resting
   // composer never exposes rows that its expansion will cover.
@@ -1792,17 +1803,14 @@ export default function ChatView(props: ChatViewProps) {
         ? buildLocalDraftThread(
             threadId,
             draftThread,
-            fallbackDraftProject?.defaultModelSelection ??
-              settings.defaultModelSelection ??
-              NO_PROVIDER_MODEL_SELECTION,
+            resolveProjectSettings(
+              settings,
+              fallbackDraftProject?.id ?? null,
+              fallbackDraftProject ?? undefined,
+            ).settings.defaultModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
           )
         : undefined,
-    [
-      draftThread,
-      fallbackDraftProject?.defaultModelSelection,
-      settings.defaultModelSelection,
-      threadId,
-    ],
+    [draftThread, fallbackDraftProject, settings, threadId],
   );
   // Promotion is data-driven: the draft route keeps rendering while the
   // server thread (same pre-allocated ref) starts, so live state must not
@@ -1952,7 +1960,7 @@ export default function ChatView(props: ChatViewProps) {
   const renderedRightPanelSurface = rightPanelPresence.value?.activeSurface ?? null;
   const renderedRightPanelSurfaces = rightPanelPresence.value?.surfaces ?? [];
   const previewMiniPlayerVisible = shouldRenderPreviewMiniPlayer(
-    activePreviewMiniPlayer?.tabId ?? null,
+    activePreviewMiniPlayer?.source ?? null,
     renderedRightPanelSurface,
   );
   const canMaximizeRightPanel = rightPanelOpen && !shouldUseRightPanelSheet;
@@ -1968,8 +1976,10 @@ export default function ChatView(props: ChatViewProps) {
   }, [activePreviewState.sessions, activeThreadRef]);
 
   useEffect(() => {
-    if (!activeThreadRef || !activePreviewMiniPlayer) return;
-    const miniTabStillExists = Boolean(activePreviewState.sessions[activePreviewMiniPlayer.tabId]);
+    if (!activeThreadRef || activePreviewMiniPlayer?.source.kind !== "browser") return;
+    const miniTabStillExists = Boolean(
+      activePreviewState.sessions[activePreviewMiniPlayer.source.tabId],
+    );
     if (!miniTabStillExists) {
       usePreviewMiniPlayerStore.getState().close(activeThreadRef);
     }
@@ -2023,12 +2033,16 @@ export default function ChatView(props: ChatViewProps) {
     [activeThread?.environmentId, activeThread?.projectId],
   );
   const activeProject = useProject(activeProjectRef);
+  // Environment settings with the active project's overrides applied.
+  const activeProjectSettings = useMemo(
+    () => resolveProjectSettings(settings, activeProject?.id ?? null, activeProject ?? undefined),
+    [activeProject, settings],
+  );
   const activeProjectScripts = useMemo(
     () => (activeProject ? resolveProjectScripts(settings, activeProject) : []),
     [activeProject, settings],
   );
-  const activeProjectDefaultModelSelection =
-    activeProject?.defaultModelSelection ?? settings.defaultModelSelection;
+  const activeProjectDefaultModelSelection = activeProjectSettings.settings.defaultModelSelection;
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   }, [activeProjectRef, handleNewThread]);
@@ -3239,6 +3253,18 @@ export default function ChatView(props: ChatViewProps) {
     timelineMessages,
     workLogEntries,
   ]);
+  const displayedTimeline = resolveThreadSwitchTimeline({
+    loading: timelineEntries.length === 0 && threadSyncPhase !== null,
+    activeThreadKey,
+    nextEntries: timelineEntries,
+    rememberedForActive: peekRememberedThreadTimeline<typeof timelineEntries>(activeThreadKey),
+  });
+  const displayedTimelineKey = displayedTimeline.displayThreadKey ?? routeThreadKey;
+  const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
+    displayedTimeline.displayThreadKey,
+    activeThreadKey,
+  );
+  const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
@@ -3337,6 +3363,24 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  useLayoutEffect(() => {
+    if (
+      threadDetailLoading ||
+      timelineEntries.length === 0 ||
+      timelineHasEphemeralPreviewUrls(timelineEntries)
+    ) {
+      return;
+    }
+    rememberReadyThreadTimeline({
+      threadKey: activeThreadKey,
+      entries: timelineEntries,
+      markdownCwd: gitCwd,
+      workspaceRoot: activeWorkspaceRoot ?? null,
+    });
+  }, [activeThreadKey, activeWorkspaceRoot, gitCwd, threadDetailLoading, timelineEntries]);
+  const heldPaintContext = paintOnlyDisplayedTimeline
+    ? peekHeldThreadTimeline<typeof timelineEntries>()
+    : null;
   const activeTerminalLaunchContext =
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Git status arrives after the composer paints. A checkout seen earlier in
@@ -3905,6 +3949,9 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
+  const supportsProjectSettingsOverrides =
+    environmentById.get(environmentId)?.serverConfig?.environment.capabilities
+      .projectSettingsOverrides === true;
   const persistProjectScripts = useCallback(
     async (input: {
       projectId: ProjectId;
@@ -3918,11 +3965,22 @@ export default function ChatView(props: ChatViewProps) {
         await updateProjectScriptSettings({
           environmentId,
           input: {
-            patch: {
-              projectScriptOverrides: {
-                [input.projectId]: input.nextScripts,
-              },
-            },
+            // The canonical key on servers that understand it; the legacy
+            // per-project map is still translated on older ones.
+            patch: supportsProjectSettingsOverrides
+              ? {
+                  projectSettingsOverrides: {
+                    [input.projectId]: {
+                      ...settings.projectSettingsOverrides[input.projectId],
+                      defaultProjectScripts: input.nextScripts,
+                    },
+                  },
+                }
+              : {
+                  projectScriptOverrides: {
+                    [input.projectId]: input.nextScripts,
+                  },
+                },
           },
         }),
         () => undefined,
@@ -3947,7 +4005,13 @@ export default function ChatView(props: ChatViewProps) {
       }
       return updateResult;
     },
-    [environmentId, updateProjectScriptSettings, upsertKeybinding],
+    [
+      environmentId,
+      settings.projectSettingsOverrides,
+      supportsProjectSettingsOverrides,
+      updateProjectScriptSettings,
+      upsertKeybinding,
+    ],
   );
   const saveProjectScript = useCallback(
     async (input: NewProjectScriptInput): Promise<AtomCommandResult<void, unknown>> => {
@@ -4155,9 +4219,13 @@ export default function ChatView(props: ChatViewProps) {
     }
     useRightPanelStore.getState().open(activeThreadRef, "device");
   }, [activeThreadRef, deviceState.onboardingCompleted, deviceState.hostStatus]);
-  // Reconcile new server sessions into separate tabs, including sessions opened
-  // by an agent or another client. The first snapshot is a baseline: persisted
-  // tabs restore themselves, and existing sessions must not resurrect closed tabs.
+  // A device the agent opens floats over chat like an agent-driven browser,
+  // or becomes a panel tab when floating previews are off. Sessions opened by
+  // another client arrive the same way; sheet layouts get neither. The first
+  // snapshot is a baseline: persisted tabs restore themselves, and existing
+  // sessions must not resurrect closed tabs. A session whose device summary
+  // has not arrived yet stays out of the baseline so a later snapshot opens it.
+  const autoShowFloatingPreview = useClientSettings(selectAutoShowFloatingPreview);
   const previousDeviceSessions = useRef(new Map<string, Set<string>>());
   useEffect(() => {
     if (!activeThreadRef || !deviceStateLoaded) return;
@@ -4166,11 +4234,30 @@ export default function ChatView(props: ChatViewProps) {
       (session) => session.threadId === activeThreadRef.threadId,
     );
     const key = (session: (typeof sessions)[number]) => `${session.hostId}:${session.deviceId}`;
+    const deviceFor = (session: (typeof sessions)[number]) =>
+      deviceState.devices.find(
+        (entry) => entry.hostId === session.hostId && entry.id === session.deviceId,
+      );
     const previous = previousDeviceSessions.current.get(threadKey);
-    previousDeviceSessions.current.set(threadKey, new Set(sessions.map(key)));
+    previousDeviceSessions.current.set(
+      threadKey,
+      new Set(sessions.filter((session) => deviceFor(session) !== undefined).map(key)),
+    );
     if (!previous || shouldUseRightPanelSheet) return;
     for (const session of sessions) {
-      if (previous?.has(key(session))) continue;
+      if (previous.has(key(session))) continue;
+      const device = deviceFor(session);
+      if (!device) continue;
+      const target = {
+        hostId: session.hostId,
+        deviceId: session.deviceId,
+        platform: device.platform,
+        name: device.name,
+      };
+      if (autoShowFloatingPreview) {
+        usePreviewMiniPlayerStore.getState().open(activeThreadRef, { kind: "device", ...target });
+        continue;
+      }
       const existing = useRightPanelStore
         .getState()
         .byThreadKey[scopedThreadKey(activeThreadRef)]?.surfaces.some(
@@ -4180,28 +4267,30 @@ export default function ChatView(props: ChatViewProps) {
             surface.target.deviceId === session.deviceId,
         );
       if (existing) continue;
-      const device = deviceState.devices.find(
-        (entry) => entry.hostId === session.hostId && entry.id === session.deviceId,
-      );
-      if (!device) continue;
-      useRightPanelStore.getState().openDevice(
-        activeThreadRef,
-        {
-          hostId: session.hostId,
-          deviceId: session.deviceId,
-          platform: device.platform,
-          name: device.name,
-        },
-        true,
-      );
+      useRightPanelStore.getState().openDevice(activeThreadRef, target, true);
     }
   }, [
     activeThreadRef,
+    autoShowFloatingPreview,
     deviceStateLoaded,
     shouldUseRightPanelSheet,
     deviceState.sessions,
     deviceState.devices,
   ]);
+  // A floating device follows its session: once the agent or another client
+  // closes the device there is nothing left to stream.
+  useEffect(() => {
+    if (!activeThreadRef || !deviceStateLoaded) return;
+    const source = activePreviewMiniPlayer?.source;
+    if (source?.kind !== "device") return;
+    const sessionStillExists = deviceState.sessions.some(
+      (session) =>
+        session.threadId === activeThreadRef.threadId &&
+        session.hostId === source.hostId &&
+        session.deviceId === source.deviceId,
+    );
+    if (!sessionStillExists) usePreviewMiniPlayerStore.getState().close(activeThreadRef);
+  }, [activePreviewMiniPlayer, activeThreadRef, deviceState.sessions, deviceStateLoaded]);
   const openFileSurface = useCallback(
     (relativePath: string) => {
       if (!activeThreadRef || !activeProject) return;
@@ -4361,10 +4450,15 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const closePreviewPanel = useCallback(() => {
     if (activeThreadRef) {
+      // Closing the panel on a live browser or device floats it instead of dropping it.
       if (activeRightPanelSurface?.kind === "preview" && activeRightPanelSurface.resourceId) {
         usePreviewMiniPlayerStore
           .getState()
-          .open(activeThreadRef, activeRightPanelSurface.resourceId);
+          .open(activeThreadRef, browserMiniPlayerSource(activeRightPanelSurface.resourceId));
+      } else if (activeRightPanelSurface?.kind === "device" && activeRightPanelSurface.target) {
+        usePreviewMiniPlayerStore
+          .getState()
+          .open(activeThreadRef, { kind: "device", ...activeRightPanelSurface.target });
       }
       setMaximizedRightPanelThreadKey(null);
       useRightPanelStore.getState().close(activeThreadRef);
@@ -4910,6 +5004,21 @@ export default function ChatView(props: ChatViewProps) {
       void legendListRef.current?.scrollToEnd?.({ animated });
     });
   }, []);
+  const displayedTimelineKeyRef = useRef(displayedTimeline.displayThreadKey);
+  useLayoutEffect(() => {
+    const displayKey = displayedTimeline.displayThreadKey;
+    if (displayKey === null || displayKey !== activeThreadKey) {
+      displayedTimelineKeyRef.current = displayKey;
+      return;
+    }
+    if (displayedTimelineKeyRef.current === displayKey) {
+      return;
+    }
+    displayedTimelineKeyRef.current = displayKey;
+    // Keep the list mounted across jumps; pin the newly displayed thread to
+    // its end the way a remount used to via initialScrollAtEnd.
+    scrollToEnd();
+  }, [activeThreadKey, displayedTimeline.displayThreadKey, scrollToEnd]);
   useLayoutEffect(() => {
     if (timelineScrollModeRef.current !== "anchoring-new-turn") {
       return;
@@ -5341,7 +5450,7 @@ export default function ChatView(props: ChatViewProps) {
     ? (draftThread?.startFromOrigin ?? false)
     : canOverrideServerThreadEnvMode
       ? (pendingServerThreadStartFromOriginByThreadId[activeThread?.id ?? ""] ??
-        primaryServerSettings.newWorktreesStartFromOrigin)
+        activeProjectSettings.settings.newWorktreesStartFromOrigin)
       : false;
   const sendEnvMode = resolveSendEnvMode({
     requestedEnvMode: envMode,
@@ -5382,11 +5491,6 @@ export default function ChatView(props: ChatViewProps) {
     (height: number) => {
       const nextHeight = Math.ceil(height);
       if (nextHeight <= 0) return;
-      const previousHeight = composerOverlayHeightRef.current;
-      if (previousHeight !== nextHeight) {
-        composerOverlayHeightRef.current = nextHeight;
-        setComposerOverlayHeight(nextHeight);
-      }
       const nextInset = resolveComposerTimelineInset({
         currentInset: composerTimelineInsetRef.current,
         overlayHeight: nextHeight,
@@ -5881,15 +5985,13 @@ export default function ChatView(props: ChatViewProps) {
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0 ||
     showPlanFollowUpPrompt;
-  const compactDisabled = compactThreadUnavailable || composerHasUnsentContent;
+  const compactDisabled = compactThreadUnavailable;
   const compactDisabledReason = compactDisabled
-    ? composerHasUnsentContent
-      ? "Send or clear your draft before compacting"
-      : !activeProject
-        ? "Choose a project before compacting"
-        : !manualCompactionProviderAvailable
-          ? "Compaction is unavailable for this provider"
-          : "Compacting is unavailable right now"
+    ? !activeProject
+      ? "Choose a project before compacting"
+      : !manualCompactionProviderAvailable
+        ? "Compaction is unavailable for this provider"
+        : "Compacting is unavailable right now"
     : null;
   const resumeCompactionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (
@@ -6478,6 +6580,78 @@ export default function ChatView(props: ChatViewProps) {
       supportsConversationRollback,
     ],
   );
+
+  const onCompactContext = async () => {
+    if (compactDisabled || !activeThread || !clientSettingsHydrated || sendInFlightRef.current) {
+      return;
+    }
+    const context = composerRef.current?.getSendContext();
+    if (!context?.providerAvailable) return;
+
+    // Compaction is a standalone command; the draft and its attachments stay local.
+    const threadId = activeThread.id;
+    const messageId = newMessageId();
+    const createdAt = new Date().toISOString();
+    sendInFlightRef.current = true;
+    beginLocalDispatch();
+    setThreadError(threadId, null);
+    setOptimisticUserMessages((messages) => [
+      ...messages,
+      {
+        id: messageId,
+        role: "user",
+        text: "/compact",
+        turnId: null,
+        createdAt,
+        updatedAt: createdAt,
+        streaming: false,
+      },
+    ]);
+    scrollToEnd();
+    try {
+      const settingsResult = await persistThreadSettingsForNextTurn({
+        threadId,
+        createdAt,
+        modelSelection: context.selectedModelSelection,
+        ...(localCheckoutBranchMismatch
+          ? { branch: localCheckoutBranchMismatch.currentBranch }
+          : {}),
+        runtimeMode,
+        interactionMode: context.interactionMode,
+      });
+      const result =
+        settingsResult._tag === "Failure"
+          ? settingsResult
+          : await startThreadTurn({
+              environmentId,
+              input: {
+                threadId,
+                message: { messageId, role: "user", text: "/compact", attachments: [] },
+                modelSelection: context.selectedModelSelection,
+                runtimeMode,
+                interactionMode: context.interactionMode,
+                createdAt,
+              },
+            });
+      if (result._tag === "Failure") {
+        setOptimisticUserMessages((messages) =>
+          messages.filter((message) => message.id !== messageId),
+        );
+        resetLocalDispatch();
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            threadId,
+            error instanceof Error ? error.message : "Failed to compact context.",
+          );
+        }
+      } else {
+        clearUsageLimitsFor(routeThreadKey);
+      }
+    } finally {
+      sendInFlightRef.current = false;
+    }
+  };
 
   const onSend = async (
     e?: { preventDefault: () => void },
@@ -7920,7 +8094,7 @@ export default function ChatView(props: ChatViewProps) {
           envMode: mode,
           startFromOrigin: resolveNewDraftStartFromOrigin({
             envMode: mode,
-            newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
+            newWorktreesStartFromOrigin: activeProjectSettings.settings.newWorktreesStartFromOrigin,
           }),
           ...(mode === "worktree" && draftThread?.worktreePath ? { worktreePath: null } : {}),
         });
@@ -7932,7 +8106,7 @@ export default function ChatView(props: ChatViewProps) {
       composerDraftTarget,
       draftThread?.worktreePath,
       isLocalDraftThread,
-      primaryServerSettings.newWorktreesStartFromOrigin,
+      activeProjectSettings.settings.newWorktreesStartFromOrigin,
       setPendingServerThreadEnvMode,
       scheduleComposerFocus,
       setDraftThreadContext,
@@ -8365,54 +8539,78 @@ export default function ChatView(props: ChatViewProps) {
               />
             </div>
             {/* Messages Wrapper */}
-            <div className="relative flex min-h-0 flex-1 flex-col">
+            <div className="relative flex min-h-0 flex-1 flex-col bg-background">
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
-                citationRequest={citationRequest}
+                citationRequest={paintOnlyDisplayedTimeline ? null : citationRequest}
                 citationHistoryLoading={threadDetailLoading}
-                onCiteAssistantText={citeAssistantText}
-                agentPanelModel={agentPanelModel}
-                onOpenAgents={addAgentsSurface}
-                key={activeThread.id}
-                isWorking={isWorking}
-                isPreparingWorktree={isPreparingWorktree}
-                isCompacting={isCompacting}
-                activeTurnStartedAt={activeWorkStartedAt}
+                {...(!paintOnlyDisplayedTimeline
+                  ? {
+                      onCiteAssistantText: citeAssistantText,
+                      agentPanelModel,
+                      onOpenAgents: addAgentsSurface,
+                      onUseArtifactTemplate: useArtifactTemplate,
+                    }
+                  : {})}
+                isWorking={!paintOnlyDisplayedTimeline && isWorking}
+                isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
+                isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
+                activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
                 listRef={legendListRef}
-                timelineEntries={timelineEntries}
-                latestTurn={activeLatestTurn}
-                runningTurnId={activeRunningTurnId}
-                turnDiffSummaries={activeThread.checkpoints}
-                activeThreadEnvironmentId={activeThread.environmentId}
-                routeThreadKey={routeThreadKey}
-                onOpenTurnDiff={onOpenTurnDiff}
-                supportsConversationRollback={supportsConversationRollback}
-                onRevertToTurnCount={onRevertTimelineTurn}
-                onUseArtifactTemplate={useArtifactTemplate}
-                isRevertingCheckpoint={isRevertingCheckpoint}
+                timelineEntries={displayedTimeline.entries}
+                latestTurn={paintOnlyDisplayedTimeline ? null : activeLatestTurn}
+                runningTurnId={paintOnlyDisplayedTimeline ? null : activeRunningTurnId}
+                turnDiffSummaries={
+                  paintOnlyDisplayedTimeline
+                    ? EMPTY_HELD_TURN_DIFF_SUMMARIES
+                    : activeThread.checkpoints
+                }
+                activeThreadEnvironmentId={
+                  displayedThreadRef?.environmentId ?? activeThread.environmentId
+                }
+                routeThreadKey={displayedTimelineKey}
+                displayThreadKey={displayedTimelineKey}
+                onOpenTurnDiff={paintOnlyDisplayedTimeline ? noopHeldTurnDiff : onOpenTurnDiff}
+                supportsConversationRollback={
+                  !paintOnlyDisplayedTimeline && supportsConversationRollback
+                }
+                onRevertToTurnCount={
+                  paintOnlyDisplayedTimeline ? noopHeldRevert : onRevertTimelineTurn
+                }
+                isRevertingCheckpoint={!paintOnlyDisplayedTimeline && isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
-                onFileOpen={openFileAttachment}
-                onFileDownload={downloadFileAttachment}
-                markdownCwd={gitCwd ?? undefined}
+                onFileOpen={paintOnlyDisplayedTimeline ? noopHeldAttachment : openFileAttachment}
+                onFileDownload={
+                  paintOnlyDisplayedTimeline ? noopHeldAttachment : downloadFileAttachment
+                }
+                markdownCwd={
+                  paintOnlyDisplayedTimeline
+                    ? (heldPaintContext?.markdownCwd ?? undefined)
+                    : (gitCwd ?? undefined)
+                }
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}
-                workspaceRoot={activeWorkspaceRoot}
+                workspaceRoot={
+                  paintOnlyDisplayedTimeline
+                    ? (heldPaintContext?.workspaceRoot ?? undefined)
+                    : activeWorkspaceRoot
+                }
                 skills={
                   activeProviderStatus
                     ? resolveProviderSkillsForCwd(activeProviderStatus, gitCwd)
                     : EMPTY_PROVIDER_SKILLS
                 }
-                anchorMessageId={timelineAnchorMessageId}
+                anchorMessageId={paintOnlyDisplayedTimeline ? null : timelineAnchorMessageId}
                 onAnchorReady={onTimelineAnchorReady}
                 contentInsetEndAdjustment={composerTimelineInset}
-                liveFollowEnabled={timelineLiveFollowEnabled}
+                liveFollowEnabled={!paintOnlyDisplayedTimeline && timelineLiveFollowEnabled}
                 onIsAtEndChange={onIsAtEndChange}
                 onContentOverflowChange={setTimelineOverflows}
                 onToolOutputCollapsedAtEnd={onToolOutputCollapsedAtEnd}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
-                loadEarlier={loadEarlierTurns}
+                loadEarlier={paintOnlyDisplayedTimeline ? null : loadEarlierTurns}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -8453,7 +8651,10 @@ export default function ChatView(props: ChatViewProps) {
                 ref={attachDraftHeroTransitionGroupRef}
                 className="w-full ps-[calc(env(safe-area-inset-left)+0.75rem)] pe-[calc(env(safe-area-inset-right)+0.75rem)] sm:ps-[calc(env(safe-area-inset-left)+1.25rem)] sm:pe-[calc(env(safe-area-inset-right)+1.25rem)]"
               >
-                <div className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-3xl">
+                <div
+                  data-chat-composer-stack="true"
+                  className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-3xl"
+                >
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full z-0">
                       <div
@@ -8575,6 +8776,7 @@ export default function ChatView(props: ChatViewProps) {
                             onPageScrollKeyDown={onComposerPageScrollKeyDown}
                             onPageScrollKeyUp={onComposerPageScrollKeyUp}
                             onPageScrollRelease={onComposerPageScrollRelease}
+                            onCompactContext={onCompactContext}
                             onSend={onSend}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
@@ -8664,10 +8866,10 @@ export default function ChatView(props: ChatViewProps) {
 
             {activeThreadRef && activePreviewMiniPlayer && previewMiniPlayerVisible ? (
               <ThreadPreviewMiniPlayer
-                key={`${activeThreadKey}:${activePreviewMiniPlayer.tabId}`}
+                key={`${activeThreadKey}:${previewMiniPlayerSourceKey(activePreviewMiniPlayer.source)}`}
                 threadRef={activeThreadRef}
-                tabId={activePreviewMiniPlayer.tabId}
-                bottomInset={isDraftHeroState ? 0 : composerOverlayHeight}
+                miniPlayer={activePreviewMiniPlayer}
+                composerOverlayElement={isDraftHeroState ? null : composerOverlayElement}
               />
             ) : null}
 
