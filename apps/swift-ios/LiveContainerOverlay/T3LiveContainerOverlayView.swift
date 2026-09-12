@@ -40,6 +40,7 @@ struct T3LiveContainerOverlayView: View {
                     .ignoresSafeArea(edges: .top)
             }
             .onAppear {
+                UserDefaults.standard.set(true, forKey: "T3IsLiveRuntime")
                 UserDefaults.standard.set(true, forKey: "LCLaunchInMultitaskMode")
                 LCUtils.appGroupUserDefault.set(
                     MultitaskMode.nativeWindow.rawValue,

@@ -10,9 +10,11 @@ struct T3CodeEmbeddedEnvironmentKey: EnvironmentKey {
 
 /// True when this process is the LiveContainer host. iLoader may re-sign with a
 /// different bundle identifier, so detect the runtime by the ObjC class only the
-/// Live build links instead of the bundle identifier.
+/// Live build links, with a defaults flag the host overlay sets on launch as a
+/// fallback.
 var isT3CodeLiveRuntime: Bool {
-    NSClassFromString("LCUtils") != nil
+    UserDefaults.standard.bool(forKey: "T3IsLiveRuntime")
+        || NSClassFromString("LCUtils") != nil
 }
 
 extension EnvironmentValues {
