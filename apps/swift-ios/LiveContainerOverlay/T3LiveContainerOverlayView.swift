@@ -88,6 +88,32 @@ struct T3LiveContainerOverlayView: View {
                         )
                     }
                 }
+                if UserDefaults.sideStoreExist() {
+                    Section {
+                        Button {
+                            logEvent("opening embedded SideStore for Apple ID sign-in")
+                            LCUtils.openSideStore()
+                        } label: {
+                            Label("Sign in with Apple ID", systemImage: "apple.logo")
+                        }
+                        Button {
+                            if importCertificateFromEmbeddedSideStore() {
+                                manualImportError = nil
+                                resumePendingRunIfPossible()
+                            } else {
+                                manualImportError = "No certificate yet. Sign in to SideStore with your Apple ID, then read again."
+                            }
+                        } label: {
+                            Label("Read Certificate from SideStore", systemImage: "arrow.down.circle")
+                        }
+                    } header: {
+                        Text("Automatic")
+                    } footer: {
+                        Text(
+                            "SideStore is built into this app. Sign in with your Apple ID and it mints the certificate; then read it here."
+                        )
+                    }
+                }
                 Section("Certificate") {
                     Button {
                         isManualFilePickerPresented = true
@@ -385,6 +411,20 @@ struct T3LiveContainerOverlayView: View {
 
     @discardableResult
     private func requestCertificateImport() -> String? {
+        // Embedded SideStore (LiveContainer+SideStore build): sign in with an
+        // Apple ID inside this app; the minted certificate lands in the shared
+        // keychain and the poller below imports it without any external app.
+        if UserDefaults.sideStoreExist() {
+            let state = UUID().uuidString
+            certificateRequestState = state
+            certificateRequestStartedAt = .now
+            logEvent("embedded SideStore present, launching for sign-in")
+            LCUtils.openSideStore(
+                urlStr: "certificate?callback_template=\(certificateCallbackTemplate())&state=\(state)"
+            )
+            scheduleCertificateImportPolling()
+            return nil
+        }
         let state = UUID().uuidString
         let callback = "t3code-livecontainer://certificate?cert=$(BASE64_CERT)&password=$(PASSWORD)&state=\(state)"
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
@@ -412,6 +452,74 @@ struct T3LiveContainerOverlayView: View {
         certificateRequestState = nil
         certificateRequestStartedAt = nil
         return "No supported store found. SideStore or AltStore is not installed, or its version does not support certificate export. Install the latest SideStore, sign in, then run this app again. [t3-live-r10]"
+    }
+
+    /// Reads the signing certificate the embedded SideStore writes into the
+    /// shared keychain after an Apple ID sign-in (service = host bundle id).
+    private func importCertificateFromEmbeddedSideStore() -> Bool {
+        let service = Bundle.main.bundleIdentifier ?? "codes.t3.t3code-live"
+        let certificateQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "signingCertificate",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecAttrService as String: service,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+        ]
+        var certificateItem: CFTypeRef?
+        guard SecItemCopyMatching(certificateQuery as CFDictionary, &certificateItem) == errSecSuccess,
+              let certificateData = certificateItem as? Data else {
+            return false
+        }
+        let passwordQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "signingCertificatePassword",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecAttrService as String: service,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+        ]
+        var passwordItem: CFTypeRef?
+        guard SecItemCopyMatching(passwordQuery as CFDictionary, &passwordItem) == errSecSuccess,
+              let passwordData = passwordItem as? Data,
+              let password = String(data: passwordData, encoding: .utf8) else {
+            return false
+        }
+        guard canImportPKCS12(certificateData, password: password) else {
+            logEvent("embedded SideStore certificate is not importable yet")
+            return false
+        }
+        storeCertificate(certificateData, password: password)
+        logEvent("imported certificate from embedded SideStore keychain")
+        return true
+    }
+
+    private var certificateImportPollingTask: Task<Void, Never>?
+
+    private func scheduleCertificateImportPolling() {
+        certificateImportPollingTask?.cancel()
+        let requestID = pendingRun?.requestID
+        certificateImportPollingTask = Task { @MainActor in
+            for _ in 0..<200 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled else { return }
+                guard let pending = pendingRun, pending.requestID == requestID else { return }
+                if importCertificateFromEmbeddedSideStore() {
+                    certificateTimeoutTask?.cancel()
+                    pendingRun = nil
+                    certificateRequestState = nil
+                    logEvent("certificate ready from embedded SideStore, resuming run")
+                    startRun(
+                        artifactURL: pending.artifactURL,
+                        bundleName: pending.bundleName,
+                        artifactSHA256: pending.artifactSHA256,
+                        requestID: pending.requestID
+                    )
+                    return
+                }
+            }
+            logEvent("embedded SideStore certificate polling timed out")
+        }
     }
 
     private func scheduleCertificateImportTimeout() {

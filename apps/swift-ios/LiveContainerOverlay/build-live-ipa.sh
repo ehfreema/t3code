@@ -405,6 +405,25 @@ if not any(
         "CFBundleURLName": f"{bundle_identifier}.sidestorebackupurlscheme",
         "CFBundleURLSchemes": [f"sidestore-com.{bundle_identifier}"],
     })
+# Primary SideStore scheme, as the stock LiveContainer+SideStore release declares
+# it: the embedded SideStore and external stores both address the host with it.
+if not any(
+    "sidestore" in item.get("CFBundleURLSchemes", [])
+    for item in url_types
+):
+    url_types.append({
+        "CFBundleTypeRole": "Editor",
+        "CFBundleURLName": f"{bundle_identifier}.sidestoreurlscheme",
+        "CFBundleURLSchemes": ["sidestore"],
+    })
+intents = info.setdefault("INIntentsSupported", [])
+for intent in ["RefreshAllIntent", "ViewAppIntent"]:
+    if intent not in intents:
+        intents.append(intent)
+activities = info.setdefault("NSUserActivityTypes", [])
+for activity in ["RefreshAllIntent", "ViewAppIntent"]:
+    if activity not in activities:
+        activities.append(activity)
 
 # Mirror stock LiveContainer release IPA: declare the store app groups so
 # SideStore/AltStore grant them in the provisioning profile at install time
@@ -451,6 +470,59 @@ PY
 #   keychain-access-groups AAAAA11111.<bundle>.shared.{0..127}
 # SideStore/AltStore read these entitlements from the signature and grant the
 # corresponding app groups + keychain groups in the provisioning profile.
+# Embed SideStore (LiveContainer fork) as Frameworks/SideStoreApp.framework so
+# T3 Code Live can mint and renew its signing certificate in-app with an Apple
+# ID sign-in, independent of any externally installed store app. Mirrors the
+# stock LiveContainer+SideStore release build (.github/build_github.sh).
+T3_LIVE_EMBED_SIDESTORE=${T3_LIVE_EMBED_SIDESTORE:-1}
+if [ "$T3_LIVE_EMBED_SIDESTORE" = "1" ]; then
+    SIDESTORE_CACHE="$BUILD_DIRECTORY/cache"
+    SIDESTORE_IPA="$SIDESTORE_CACHE/SideStore.ipa"
+    DYLIBIFY_BIN="$SIDESTORE_CACHE/dylibify"
+    mkdir -p "$SIDESTORE_CACHE"
+    if [ ! -f "$SIDESTORE_IPA" ]; then
+        wget -q -O "$SIDESTORE_IPA" \
+            "https://github.com/LiveContainer/SideStore/releases/download/nightly/SideStore.ipa"
+    fi
+    if [ ! -f "$SIDESTORE_IPA" ]; then
+        printf 'SideStore.ipa download failed; building without embedded SideStore.\n' >&2
+    else
+        SIDESTORE_EXTRACT="$SIDESTORE_CACHE/extract"
+        remove_directory "$SIDESTORE_EXTRACT"
+        mkdir -p "$SIDESTORE_EXTRACT"
+        unzip -q "$SIDESTORE_IPA" -x "__MACOSX/*" -d "$SIDESTORE_EXTRACT"
+        if [ -d "$SIDESTORE_EXTRACT/Payload/SideStore.app" ]; then
+            ditto "$SIDESTORE_EXTRACT/Payload/SideStore.app" \
+                "$APP_PATH/Frameworks/SideStoreApp.framework"
+            if [ ! -f "$DYLIBIFY_BIN" ]; then
+                curl -fsSL -o "$DYLIBIFY_BIN" \
+                    "https://github.com/LiveContainer/dylibify/releases/download/1.0/dylibify" \
+                    && chmod +x "$DYLIBIFY_BIN"
+            fi
+            if [ -f "$DYLIBIFY_BIN" ]; then
+                "$DYLIBIFY_BIN" \
+                    "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore" \
+                    "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore.dylib"
+                rm -f "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore"
+                ldid -S "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore.dylib" 2>/dev/null || true
+                SS_LICENSE="$APP_PATH/Frameworks/SideStoreApp.framework/LICENSE-SIDESTORE-AGPL.txt"
+                if [ ! -f "$SS_LICENSE" ]; then
+                    curl -fsSL -o "$SS_LICENSE" \
+                        "https://raw.githubusercontent.com/LiveContainer/SideStore/develop/LICENSE" \
+                        || true
+                fi
+                echo "Embedded SideStore into $APP_PATH"
+            else
+                echo "dylibify unavailable; removing unusable SideStoreApp.framework." >&2
+                rm -rf "$APP_PATH/Frameworks/SideStoreApp.framework"
+            fi
+        else
+            echo "SideStore.app not found in the downloaded IPA; skipping embedding." >&2
+        fi
+        remove_directory "$SIDESTORE_EXTRACT"
+    fi
+fi
+
 ENTITLEMENTS_TMP="$(mktemp /tmp/t3-live-entitlements.XXXXXX.plist)"
 python3 - "$LIVECONTAINER_DIRECTORY/entitlements.xml" "$ENTITLEMENTS_TMP" "$T3_LIVE_BUNDLE_IDENTIFIER" <<'PY'
 import sys
