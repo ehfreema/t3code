@@ -1,121 +1,64 @@
-# T3 Code
+<p align="center">
+  <img src="apps/swift-ios/Resources/lct3.icon/Assets/t3lc.png" width="160" alt="lct3 app icon">
+</p>
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+# lct3
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
+lct3 is a rebuilt SwiftUI iPhone client for T3 Code, forked from [T3 Code](https://github.com/pingdotgg/t3code).
+It pairs to any T3 Code server and turns an agent thread into a device IPA: it asks the server
+to build your project's iOS app, streams the artifact to the phone, and runs it on-device through
+the LiveContainer runtime. Everything else in T3 Code — the server, web app, desktop app, and the
+provider adapters — is here too, kept current with upstream.
 
-## "Wait, what are you selling me?"
+## What it adds
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+- **Run iOS App from a thread.** Pick an Xcode project or a build recipe, and the server builds a
+  device IPA with status streaming, a watchdog, and deterministic, content-addressed artifacts.
+- **On-device runtime.** Verifies artifact integrity (SHA-256), installs with rollback, and manages
+  the signing certificate lifecycle inside the sideloaded Live app.
+- **Resilient transfer.** Signed URLs with a chunked, resumable fallback for older servers.
 
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
+## Install
 
-## Installation
-
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
-
-### Try it out (install-free)
-
-The easiest way to test T3 Code is to run the server in your terminal (requires Node.js 22.16+, 23.11+, or 24.10+):
+There are no releases yet — build from source. You need a Mac with a current Xcode and iOS 17+.
 
 ```bash
-npx t3@latest
+git clone https://github.com/ehfreema/lct3.git
+cd lct3
+xcodebuild -project apps/swift-ios/T3Code.xcodeproj -scheme T3Code -configuration Release \
+  -destination 'generic/platform=iOS' -derivedDataPath apps/swift-ios/.derivedData-device build
 ```
 
-This will launch T3 Code's backend on your machine as well as the local web app to control your agents.
+The build is unsigned by default. Sideload the resulting `T3Code.app` into the LiveContainer
+runtime, or sign it with your own developer identity. Then start a T3 Code server on your machine
+(`npx t3@latest`) and pair the phone over your network with the pairing URL.
 
-Tip: Use `npx t3@latest --help` for the full CLI reference.
-
-### Desktop app
-
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
-
-#### Windows (`winget`)
+For day-to-day development and testing, run the Debug build on a simulator:
 
 ```bash
-winget install T3Tools.T3Code
+xcodebuild -project apps/swift-ios/T3Code.xcodeproj -scheme T3Code \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-#### macOS (Homebrew)
+## Server and web
 
-```bash
-brew install --cask t3-code
-```
-
-#### Arch Linux (AUR)
-
-Stable:
-
-```bash
-yay -S t3code-bin
-```
-
-Nightly:
-
-```bash
-yay -S t3code-nightly-bin
-```
-
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
-
-## Some notes
-
-We are very very early in this project. Expect bugs.
-
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
-
-## Documentation
-
-Full docs live in [docs/](./docs). There's no docs site yet.
-
-- [Install and first run](./docs/user/install.md)
-- [Permission modes](./docs/user/permission-modes.md)
-- [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Project settings](./docs/user/project-settings.md)
-- [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
-- [Source control integrations](./docs/user/source-control.md)
-- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- [Run T3 Code as a background service](./docs/user/background-service.md)
-
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
-
-## If you REALLY want to contribute still.... read this first
-
-### Install `vp`
-
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
-
-#### macOS / Linux
-
-```bash
-curl -fsSL https://vite.plus | bash
-```
-
-#### Windows
-
-```bash
-irm https://vite.plus/ps1 | iex
-```
-
-Checkout their getting started guide for more information: https://viteplus.dev/guide/
-
-### Install dependencies
+The T3 Code server, web app, and desktop app live in this repository and work as upstream:
 
 ```bash
 vp i
+vp run dev
 ```
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
+## Documentation
 
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
+- [Build and run an iPhone app](docs/user/run-ios-apps.md)
+- [On-device runtime internals](docs/internals/ios-app-runtime.md)
+- [Install and first run](docs/user/install.md) · [Remote access](docs/user/remote-access.md)
+- Full docs live in [docs/](docs). The [upstream README](https://github.com/pingdotgg/t3code#readme)
+  covers everything T3 Code does.
 
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+## About this fork
+
+lct3 is a personal fork of T3 Code, MIT-licensed like upstream. Upstream attribution and the
+original license remain in [LICENSE](LICENSE). T3 Code itself is developed at
+[pingdotgg/t3code](https://github.com/pingdotgg/t3code).
