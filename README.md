@@ -4,11 +4,13 @@
 
 # lct3
 
-lct3 is a rebuilt SwiftUI iPhone client for T3 Code, forked from [T3 Code](https://github.com/pingdotgg/t3code).
-It pairs to any T3 Code server and turns an agent thread into a device IPA: it asks the server
-to build your project's iOS app, streams the artifact to the phone, and runs it on-device through
-the LiveContainer runtime. Everything else in T3 Code — the server, web app, desktop app, and the
-provider adapters — is here too, kept current with upstream.
+lct3 is a personal fork of [T3 Code](https://github.com/pingdotgg/t3code), built on the
+SwiftUI iPhone client from T3 Code's own iOS rebuild branch
+(`t3code/rebuild-mobile-app-swift`). It pairs to any T3 Code server and turns an agent
+thread into a device IPA: it asks the server to build your project's iOS app, streams the
+artifact to the phone, and runs it on-device through the LiveContainer runtime. Everything
+else in T3 Code — the server, web app, desktop app, and the provider adapters — is here
+too, kept current with upstream.
 
 ## What it adds
 
