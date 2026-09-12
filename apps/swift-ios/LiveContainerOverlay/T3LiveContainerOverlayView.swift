@@ -1,16 +1,28 @@
 import Darwin
+import Security
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct T3LiveContainerOverlayView: View {
     @EnvironmentObject private var sharedModel: SharedModel
 
     @State private var isRunningRequest = false
     @State private var pendingRun: PendingRun?
+    @State private var certificateRequestState: String?
+    @State private var certificateRequestStartedAt: Date?
+    @State private var certificateTimeoutTask: Task<Void, Never>?
+    @State private var isManualImportPresented = false
+    @State private var isManualFilePickerPresented = false
+    @State private var manualImportData: Data?
+    @State private var manualImportFileName: String?
+    @State private var manualImportPassword = ""
+    @State private var manualImportError: String?
 
     private struct PendingRun {
         let artifactURL: URL
         let bundleName: String
+        let artifactSHA256: String?
         let requestID: String
     }
 
@@ -36,15 +48,118 @@ struct T3LiveContainerOverlayView: View {
                 LCUtils.appGroupUserDefault.set(true, forKey: "LCSkipTerminatedScreen")
                 autoPromptCertificateIfNeeded()
             }
-            .onOpenURL(perform: handle)
+            .onOpenURL { url in
+                handle(url, allowsRun: false)
+            }
             .onReceive(
                 NotificationCenter.default.publisher(
                     for: Notification.Name("T3CodeEmbeddedLiveContainerRoute")
                 )
             ) { notification in
                 guard let route = notification.object as? URL else { return }
-                handle(route)
+                handle(route, allowsRun: true)
             }
+            .sheet(isPresented: $isManualImportPresented) {
+                manualImportSheet
+            }
+    }
+
+    private var manualImportSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text(
+                        "A signing certificate is required to install apps on this phone. Choose a .p12 certificate file and enter its password. T3 Code stores it in the app container and signs future installs with it."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+                Section("Certificate") {
+                    Button {
+                        isManualFilePickerPresented = true
+                    } label: {
+                        Label(
+                            manualImportFileName ?? "Choose .p12 file",
+                            systemImage: "key.horizontal"
+                        )
+                    }
+                    if let fileName = manualImportFileName {
+                        LabeledContent("File", value: fileName)
+                    }
+                    SecureField("Certificate password", text: $manualImportPassword)
+                    if let manualImportError {
+                        Text(manualImportError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+                Section {
+                    Button("Import Certificate") {
+                        importManualCertificate()
+                    }
+                    .disabled(manualImportData == nil || manualImportPassword.isEmpty)
+                }
+                Section {
+                    Button("Cancel", role: .cancel) {
+                        cancelManualImport()
+                    }
+                }
+            }
+            .navigationTitle("Signing Certificate")
+            .navigationBarTitleDisplayMode(.inline)
+            .fileImporter(
+                isPresented: $isManualFilePickerPresented,
+                allowedContentTypes: [.data]
+            ) { result in
+                switch result {
+                case .success(let url):
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        manualImportData = try Data(contentsOf: url)
+                        manualImportFileName = url.lastPathComponent
+                        manualImportError = nil
+                    } catch {
+                        manualImportError = "T3 Code could not read the selected file."
+                    }
+                case .failure(let error):
+                    manualImportError = error.localizedDescription
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func importManualCertificate() {
+        guard let data = manualImportData else { return }
+        guard !manualImportPassword.isEmpty else {
+            manualImportError = "Enter the certificate password."
+            return
+        }
+        guard canImportPKCS12(data, password: manualImportPassword) else {
+            manualImportError = "T3 Code could not read this certificate. Check the password and the file."
+            return
+        }
+        storeCertificate(data, password: manualImportPassword)
+        isManualImportPresented = false
+        manualImportData = nil
+        manualImportFileName = nil
+        manualImportPassword = ""
+        manualImportError = nil
+        logEvent("manual certificate import completed")
+        resumePendingRunIfPossible()
+    }
+
+    private func cancelManualImport() {
+        isManualImportPresented = false
+        manualImportData = nil
+        manualImportFileName = nil
+        manualImportPassword = ""
+        manualImportError = nil
+        if let pending = pendingRun {
+            complete(requestID: pending.requestID, error: "Certificate import was canceled.")
+        }
+        pendingRun = nil
     }
 
     // When the app comes to the foreground without a certificate (e.g. the user tapped a
@@ -57,10 +172,12 @@ struct T3LiveContainerOverlayView: View {
             return
         }
         UserDefaults.standard.set(Date.now, forKey: "T3CertImportPromptedAt")
-        requestCertificateImport()
+        if requestCertificateImport() != nil {
+            isManualImportPresented = true
+        }
     }
 
-    private func handle(_ url: URL) {
+    private func handle(_ url: URL, allowsRun: Bool) {
         // Never log query strings: the certificate callback carries the certificate and
         // its password, and other URLs may carry tokens.
         logEvent("URL received: \(url.scheme ?? "(no scheme)")://\(url.host ?? "(no host)")")
@@ -88,6 +205,11 @@ struct T3LiveContainerOverlayView: View {
             return
         }
 
+        guard allowsRun else {
+            logEvent("rejected an external app-run request")
+            return
+        }
+
         let queryItems = URLComponents(
             url: url,
             resolvingAgainstBaseURL: false
@@ -97,22 +219,31 @@ struct T3LiveContainerOverlayView: View {
               let requestID,
               let artifactValue = queryItems.first(where: { $0.name == "url" })?.value,
               let artifactURL = URL(string: artifactValue),
+              let artifactScheme = artifactURL.scheme?.lowercased(),
+              ["file", "http", "https"].contains(artifactScheme),
               let bundleName = queryItems.first(where: { $0.name == "bundle-name" })?.value else {
             complete(requestID: requestID, error: "T3 Code received an invalid app-run request.")
             return
         }
+        let artifactSHA256 = queryItems.first(where: { $0.name == "artifact-sha256" })?.value
 
         guard isCertificateReady else {
             logEvent("run request received but certificate is missing (appGroup: \(LCSharedUtils.appGroupID() ?? "nil"))")
             if pendingRun == nil {
-                pendingRun = PendingRun(artifactURL: artifactURL, bundleName: bundleName, requestID: requestID)
-                let failureMessage = requestCertificateImport()
-                if let failureMessage {
-                    pendingRun = nil
-                    complete(requestID: requestID, error: failureMessage)
-                    return
+                pendingRun = PendingRun(
+                    artifactURL: artifactURL,
+                    bundleName: bundleName,
+                    artifactSHA256: artifactSHA256,
+                    requestID: requestID
+                )
+                if requestCertificateImport() != nil {
+                    // No SideStore/AltStore to export from. Fall back to the in-app
+                    // manual .p12 import; the pending run resumes when it completes.
+                    logEvent("no store available for export, presenting manual import")
+                    isManualImportPresented = true
+                } else {
+                    scheduleCertificateImportTimeout()
                 }
-                scheduleCertificateImportTimeout()
             } else {
                 // Another run is already waiting for the certificate import. Fail fast so
                 // the caller is not left waiting forever.
@@ -125,10 +256,20 @@ struct T3LiveContainerOverlayView: View {
         }
 
         logEvent("certificate ready, starting run")
-        startRun(artifactURL: artifactURL, bundleName: bundleName, requestID: requestID)
+        startRun(
+            artifactURL: artifactURL,
+            bundleName: bundleName,
+            artifactSHA256: artifactSHA256,
+            requestID: requestID
+        )
     }
 
-    private func startRun(artifactURL: URL, bundleName: String, requestID: String) {
+    private func startRun(
+        artifactURL: URL,
+        bundleName: String,
+        artifactSHA256: String?,
+        requestID: String
+    ) {
         guard !isRunningRequest else {
             complete(requestID: requestID, error: "Another iPhone app is already starting.")
             return
@@ -140,25 +281,97 @@ struct T3LiveContainerOverlayView: View {
                 try await T3HeadlessAppRuntime.installAndRun(
                     artifactURL: artifactURL,
                     expectedBundleName: bundleName,
+                    expectedArtifactSHA256: artifactSHA256,
                     sharedModel: sharedModel
                 )
                 complete(requestID: requestID, error: nil)
             } catch {
-                logEvent("run FAILED: \(error.localizedDescription)")
-                complete(requestID: requestID, error: error.localizedDescription)
+                var message = error.localizedDescription
+                if isCertificateSigningFailure(message) {
+                    clearStoredCertificate()
+                    message += " T3 Code removed the invalid certificate. Run the app again to import a new certificate."
+                }
+                logEvent("run FAILED: \(message)")
+                complete(requestID: requestID, error: message)
             }
         }
     }
 
     private var isCertificateReady: Bool {
-        let data = LCUtils.certificateData()
-        let password = LCSharedUtils.certificatePassword()
-        return data != nil && password != nil
+        guard let data = LCUtils.certificateData(),
+              let password = LCSharedUtils.certificatePassword() else {
+            return false
+        }
+        return canImportPKCS12(data, password: password)
+    }
+
+    private func canImportPKCS12(_ data: Data, password: String) -> Bool {
+        var importedItems: CFArray?
+        let status = SecPKCS12Import(
+            data as CFData,
+            [kSecImportExportPassphrase as String: password] as CFDictionary,
+            &importedItems
+        )
+        guard status == errSecSuccess,
+              let item = (importedItems as? [[String: Any]])?.first,
+              let identityValue = item[kSecImportItemIdentity as String] else {
+            return false
+        }
+        let identity = identityValue as! SecIdentity
+        var certificate: SecCertificate?
+        guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
+              let certificate else {
+            return false
+        }
+        var trust: SecTrust?
+        guard SecTrustCreateWithCertificates(
+            certificate,
+            SecPolicyCreateBasicX509(),
+            &trust
+        ) == errSecSuccess, let trust else { return false }
+        SecTrustSetAnchorCertificates(trust, [certificate] as CFArray)
+        SecTrustSetAnchorCertificatesOnly(trust, true)
+        return SecTrustEvaluateWithError(trust, nil)
+    }
+
+    private func storeCertificate(_ certData: Data, password: String) {
+        LCUtils.appGroupUserDefault.set(certData, forKey: "LCCertificateData")
+        LCUtils.appGroupUserDefault.set(password, forKey: "LCCertificatePassword")
+        LCUtils.appGroupUserDefault.set(Date.now, forKey: "LCCertificateUpdateDate")
+        UserDefaults.standard.set(certData, forKey: "LCCertificateData")
+        UserDefaults.standard.set(password, forKey: "LCCertificatePassword")
+        UserDefaults.standard.set(Date.now, forKey: "LCCertificateUpdateDate")
+        UserDefaults.standard.synchronize()
+    }
+
+    private func isCertificateSigningFailure(_ message: String) -> Bool {
+        let normalized = message.lowercased()
+        return ["certificate", "pkcs", "p12", "password", "signing identity", "expired"]
+            .contains(where: normalized.contains)
+    }
+
+    private func clearStoredCertificate() {
+        for defaults in [LCUtils.appGroupUserDefault, UserDefaults.standard] {
+            defaults.removeObject(forKey: "LCCertificateData")
+            defaults.removeObject(forKey: "LCCertificatePassword")
+            defaults.removeObject(forKey: "LCCertificateUpdateDate")
+        }
+        UserDefaults.standard.synchronize()
+        certificateRequestState = nil
+        certificateRequestStartedAt = nil
     }
 
     @discardableResult
     private func requestCertificateImport() -> String? {
-        let importURLString = "certificate?callback_template=t3code-livecontainer%3A%2F%2Fcertificate%3Fcert%3D%24%28BASE64_CERT%29%26password%3D%24%28PASSWORD%29"
+        let state = UUID().uuidString
+        let callback = "t3code-livecontainer://certificate?cert=$(BASE64_CERT)&password=$(PASSWORD)&state=\(state)"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard let encodedCallback = callback.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            return "T3 Code could not create the certificate callback."
+        }
+        let importURLString = "certificate?callback_template=\(encodedCallback)"
+        certificateRequestState = state
+        certificateRequestStartedAt = .now
         // Try SideStore first, then AltStore, mirroring the stock LiveContainer
         // settings flow. The store is not detectable here (App Group Unknown), so both
         // schemes are attempted. An unavailable scheme is ignored by the system.
@@ -174,14 +387,23 @@ struct T3LiveContainerOverlayView: View {
             }
             return nil
         }
+        certificateRequestState = nil
+        certificateRequestStartedAt = nil
         return "No supported store found. SideStore or AltStore is not installed, or its version does not support certificate export. Install the latest SideStore, sign in, then run this app again. [t3-live-r10]"
     }
 
     private func scheduleCertificateImportTimeout() {
-        Task { @MainActor in
+        certificateTimeoutTask?.cancel()
+        let requestID = pendingRun?.requestID
+        certificateTimeoutTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 120_000_000_000)
-            guard let pending = pendingRun else { return }
+            guard !Task.isCancelled,
+                  let pending = pendingRun,
+                  pending.requestID == requestID else { return }
             pendingRun = nil
+            certificateRequestState = nil
+            certificateRequestStartedAt = nil
+            certificateTimeoutTask = nil
             logEvent("certificate import timeout after 120s")
             complete(
                 requestID: pending.requestID,
@@ -193,22 +415,24 @@ struct T3LiveContainerOverlayView: View {
     private func handleCertificateCallback(_ url: URL) {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
         let queryItems = (components.queryItems ?? []).reduce(into: [String: String]()) { $0[$1.name.lowercased()] = $1.value }
-        guard let encodedCert = queryItems["cert"]?.removingPercentEncoding,
+        guard let expectedState = certificateRequestState,
+              queryItems["state"] == expectedState,
+              let requestedAt = certificateRequestStartedAt,
+              Date().timeIntervalSince(requestedAt) < 300,
+              let encodedCert = queryItems["cert"]?.removingPercentEncoding,
               let password = queryItems["password"],
               let certData = Data(base64Encoded: encodedCert)
         else {
-            logEvent("certificate callback received but could not be parsed")
+            logEvent("certificate callback was invalid or expired")
             return
         }
 
+        certificateRequestState = nil
+        certificateRequestStartedAt = nil
+        certificateTimeoutTask?.cancel()
+        certificateTimeoutTask = nil
         logEvent("certificate callback: cert \(certData.count) bytes, password \(password.count) chars")
-        LCUtils.appGroupUserDefault.set(certData, forKey: "LCCertificateData")
-        LCUtils.appGroupUserDefault.set(password, forKey: "LCCertificatePassword")
-        LCUtils.appGroupUserDefault.set(Date.now, forKey: "LCCertificateUpdateDate")
-        UserDefaults.standard.set(certData, forKey: "LCCertificateData")
-        UserDefaults.standard.set(password, forKey: "LCCertificatePassword")
-        UserDefaults.standard.set(Date.now, forKey: "LCCertificateUpdateDate")
-        UserDefaults.standard.synchronize()
+        storeCertificate(certData, password: password)
         logEvent("certificate stored (app group + app defaults)")
     }
 
@@ -250,6 +474,7 @@ struct T3LiveContainerOverlayView: View {
         startRun(
             artifactURL: pending.artifactURL,
             bundleName: pending.bundleName,
+            artifactSHA256: pending.artifactSHA256,
             requestID: pending.requestID
         )
     }
