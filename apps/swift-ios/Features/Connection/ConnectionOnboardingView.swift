@@ -69,10 +69,12 @@ public struct ConnectionOnboardingView: View {
             .toolbarBackground(T3Colors.background, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
-                if stage == .welcome, let onCancel {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close", action: onCancel)
-                            .accessibilityIdentifier("connection-onboarding-close")
+                if stage == .welcome {
+                    if let onCancel {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close", action: onCancel)
+                                .accessibilityIdentifier("connection-onboarding-close")
+                        }
                     }
                     if isT3CodeLiveRuntime {
                         ToolbarItem(placement: .primaryAction) {
