@@ -170,9 +170,7 @@ public struct SettingsView: View {
     }
 
     private var isLiveRuntime: Bool {
-        // iLoader may re-sign with a different bundle identifier, so detect the
-        // LiveContainer runtime by the ObjC class only the Live build links.
-        NSClassFromString("LCUtils") != nil
+        isT3CodeLiveRuntime
     }
 
     private var aboutSection: some View {

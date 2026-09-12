@@ -8,6 +8,13 @@ struct T3CodeEmbeddedEnvironmentKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+/// True when this process is the LiveContainer host. iLoader may re-sign with a
+/// different bundle identifier, so detect the runtime by the ObjC class only the
+/// Live build links instead of the bundle identifier.
+var isT3CodeLiveRuntime: Bool {
+    NSClassFromString("LCUtils") != nil
+}
+
 extension EnvironmentValues {
     var t3CodeEmbedded: Bool {
         get { self[T3CodeEmbeddedEnvironmentKey.self] }

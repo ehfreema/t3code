@@ -74,6 +74,21 @@ public struct ConnectionOnboardingView: View {
                         Button("Close", action: onCancel)
                             .accessibilityIdentifier("connection-onboarding-close")
                     }
+                    if isT3CodeLiveRuntime {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button {
+                                NotificationCenter.default.post(
+                                    name: Notification.Name("T3CodeEmbeddedShowCertificateImport"),
+                                    object: nil
+                                )
+                            } label: {
+                                Label("Signing Certificate", systemImage: "key.horizontal")
+                            }
+                            .accessibilityLabel("Signing Certificate")
+                            .accessibilityHint("Import the certificate used to sign installed apps")
+                            .accessibilityIdentifier("connection-onboarding-signing-certificate")
+                        }
+                    }
                 } else if stage == .checking || stage == .connecting {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") {
