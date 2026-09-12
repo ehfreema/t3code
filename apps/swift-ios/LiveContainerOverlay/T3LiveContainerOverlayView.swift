@@ -59,6 +59,13 @@ struct T3LiveContainerOverlayView: View {
                 guard let route = notification.object as? URL else { return }
                 handle(route, allowsRun: true)
             }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: Notification.Name("T3CodeEmbeddedShowCertificateImport")
+                )
+            ) { _ in
+                openManualImport()
+            }
             .sheet(isPresented: $isManualImportPresented) {
                 manualImportSheet
             }
@@ -73,6 +80,12 @@ struct T3LiveContainerOverlayView: View {
                     )
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    if let storedAt = LCUtils.appGroupUserDefault.object(forKey: "LCCertificateUpdateDate") as? Date {
+                        LabeledContent(
+                            "Stored",
+                            value: storedAt.formatted(date: .abbreviated, time: .shortened)
+                        )
+                    }
                 }
                 Section("Certificate") {
                     Button {
@@ -100,7 +113,7 @@ struct T3LiveContainerOverlayView: View {
                     .disabled(manualImportData == nil || manualImportPassword.isEmpty)
                 }
                 Section {
-                    Button("Cancel", role: .cancel) {
+                    Button(pendingRun == nil ? "Done" : "Cancel", role: .cancel) {
                         cancelManualImport()
                     }
                 }
@@ -128,6 +141,14 @@ struct T3LiveContainerOverlayView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private func openManualImport() {
+        manualImportData = nil
+        manualImportFileName = nil
+        manualImportPassword = ""
+        manualImportError = nil
+        isManualImportPresented = true
     }
 
     private func importManualCertificate() {

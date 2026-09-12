@@ -148,8 +148,29 @@ public struct SettingsView: View {
                     isOn: preference(\.hapticsEnabled)
                 )
                 .accessibilityIdentifier("settings-haptics")
+                if isLiveRuntime {
+                    settingsDivider
+                    Button {
+                        NotificationCenter.default.post(
+                            name: Notification.Name("T3CodeEmbeddedShowCertificateImport"),
+                            object: nil
+                        )
+                    } label: {
+                        SettingsNavigationRow(
+                            title: "Signing Certificate",
+                            systemImage: "key.horizontal"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Import the certificate used to sign installed apps")
+                    .accessibilityIdentifier("settings-signing-certificate")
+                }
             }
         }
+    }
+
+    private var isLiveRuntime: Bool {
+        Bundle.main.bundleIdentifier == "codes.t3.t3code-live"
     }
 
     private var aboutSection: some View {
