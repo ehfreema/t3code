@@ -522,6 +522,13 @@ struct T3LiveContainerOverlayView: View {
         }
     }
 
+    private func certificateCallbackTemplate() -> String {
+        let callback = "t3code-livecontainer://certificate?cert=$(BASE64_CERT)&password=$(PASSWORD)"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return callback.addingPercentEncoding(withAllowedCharacters: allowed)
+            ?? callback
+    }
+
     private func scheduleCertificateImportTimeout() {
         certificateTimeoutTask?.cancel()
         let requestID = pendingRun?.requestID
