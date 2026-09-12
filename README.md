@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/lct3-icon.png" width="160" alt="lct3 app icon">
+  <img src="assets/lct3-icon-squircle.png" width="160" alt="lct3 app icon">
 </p>
 
 # lct3
