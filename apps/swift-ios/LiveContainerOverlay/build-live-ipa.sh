@@ -503,7 +503,15 @@ if [ "$T3_LIVE_EMBED_SIDESTORE" = "1" ]; then
                 "$DYLIBIFY_BIN" \
                     "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore" \
                     "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore.dylib"
-                rm -f "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore"
+                # LCBundleExecutable (LiveContainer convention) wins over
+                # CFBundleExecutable when the host boots the embedded app, so
+                # the dylibified binary is the one that loads. The original
+                # Mach-O stays in place because installers re-sign every
+                # executable the plists name.
+                plutil -replace LCBundleExecutable -string SideStore.dylib \
+                    "$APP_PATH/Frameworks/SideStoreApp.framework/Info.plist"
+                plutil -replace LCBundleIdentifier -string com.SideStore.SideStore \
+                    "$APP_PATH/Frameworks/SideStoreApp.framework/Info.plist"
                 ldid -S "$APP_PATH/Frameworks/SideStoreApp.framework/SideStore.dylib" 2>/dev/null || true
                 SS_LICENSE="$APP_PATH/Frameworks/SideStoreApp.framework/LICENSE-SIDESTORE-AGPL.txt"
                 if [ ! -f "$SS_LICENSE" ]; then
