@@ -494,7 +494,7 @@ struct T3LiveContainerOverlayView: View {
         return true
     }
 
-    private var certificateImportPollingTask: Task<Void, Never>?
+    @State private var certificateImportPollingTask: Task<Void, Never>?
 
     private func scheduleCertificateImportPolling() {
         certificateImportPollingTask?.cancel()
