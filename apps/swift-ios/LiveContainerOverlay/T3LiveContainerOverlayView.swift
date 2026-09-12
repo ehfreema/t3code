@@ -92,7 +92,9 @@ struct T3LiveContainerOverlayView: View {
                     Section {
                         Button {
                             logEvent("opening embedded SideStore for Apple ID sign-in")
+                            certificateRequestStartedAt = .now
                             LCUtils.openSideStore()
+                            scheduleCertificateImportPolling()
                         } label: {
                             Label("Sign in with Apple ID", systemImage: "apple.logo")
                         }
@@ -176,6 +178,13 @@ struct T3LiveContainerOverlayView: View {
         manualImportPassword = ""
         manualImportError = nil
         isManualImportPresented = true
+        // A sign-in from Settings also lands the certificate in the shared
+        // keychain. Refresh the Stored date live instead of requiring the
+        // manual read button.
+        if UserDefaults.sideStoreExist() {
+            scheduleCertificateImportPolling()
+            startKeychainRefreshPolling()
+        }
     }
 
     private func importManualCertificate() {
@@ -204,6 +213,10 @@ struct T3LiveContainerOverlayView: View {
         manualImportFileName = nil
         manualImportPassword = ""
         manualImportError = nil
+        certificateImportPollingTask?.cancel()
+        certificateImportPollingTask = nil
+        keychainRefreshTask?.cancel()
+        keychainRefreshTask = nil
         if let pending = pendingRun {
             complete(requestID: pending.requestID, error: "Certificate import was canceled.")
         }
@@ -337,7 +350,17 @@ struct T3LiveContainerOverlayView: View {
                 var message = error.localizedDescription
                 if isCertificateSigningFailure(message) {
                     clearStoredCertificate()
-                    message += " T3 Code removed the invalid certificate. Run the app again to import a new certificate."
+                    message += " T3 Code removed the invalid certificate. Import a new certificate."
+                    logEvent("run FAILED: \(message)")
+                    complete(requestID: requestID, error: message)
+                    // Re-open the import sheet so the replacement flow starts
+                    // immediately instead of requiring the user to find it.
+                    if UserDefaults.sideStoreExist() {
+                        openManualImport()
+                    } else {
+                        autoPromptCertificateIfNeeded()
+                    }
+                    return
                 }
                 logEvent("run FAILED: \(message)")
                 complete(requestID: requestID, error: message)
@@ -495,6 +518,7 @@ struct T3LiveContainerOverlayView: View {
     }
 
     @State private var certificateImportPollingTask: Task<Void, Never>?
+    @State private var keychainRefreshTask: Task<Void, Never>?
 
     private func scheduleCertificateImportPolling() {
         certificateImportPollingTask?.cancel()
@@ -527,6 +551,28 @@ struct T3LiveContainerOverlayView: View {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         return callback.addingPercentEncoding(withAllowedCharacters: allowed)
             ?? callback
+    }
+
+    /// Passive poll while the certificate sheet is open with the embedded
+    /// SideStore present: refresh the Stored date and auto-close once a
+    /// sign-in lands a valid certificate and no run needs resuming.
+    private func startKeychainRefreshPolling() {
+        keychainRefreshTask?.cancel()
+        keychainRefreshTask = Task { @MainActor in
+            for _ in 0..<600 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled else { return }
+                guard isManualImportPresented else { return }
+                if isCertificateReady {
+                    certificateRequestState = nil
+                    continue
+                }
+                if importCertificateFromEmbeddedSideStore() {
+                    logEvent("keychain refresh picked up a new certificate")
+                    manualImportError = nil
+                }
+            }
+        }
     }
 
     private func scheduleCertificateImportTimeout() {
