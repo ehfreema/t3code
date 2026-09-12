@@ -9,16 +9,6 @@
     {
       "layers": [
         {
-          "fill": "automatic",
-          "hidden": true,
-          "image-name": "livecontainer_icon.png",
-          "name": "livecontainer_icon",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [0, 0]
-          }
-        },
-        {
           "glass-specializations": [
             {
               "value": false

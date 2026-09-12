@@ -62,5 +62,13 @@ vp run dev
 ## About this fork
 
 lct3 is a personal fork of T3 Code, MIT-licensed like upstream. Upstream attribution and the
-original license remain in [LICENSE](LICENSE). T3 Code itself is developed at
-[pingdotgg/t3code](https://github.com/pingdotgg/t3code).
+original license remain in [LICENSE](LICENSE).
+
+The iPhone runtime builds on [LiveContainer](https://github.com/LiveContainer/LiveContainer)
+(AGPL-3.0, pinned commit in
+[build-live-ipa.sh](apps/swift-ios/LiveContainerOverlay/build-live-ipa.sh)). The
+[LiveContainerOverlay](apps/swift-ios/LiveContainerOverlay) sources are LiveContainer-derived
+and stay under the GNU AGPL version 3 — the Live IPA is distributed together with its
+corresponding source. Details in
+[AGPL-NOTICE.md](apps/swift-ios/LiveContainerOverlay/AGPL-NOTICE.md). The standard SwiftUI
+target contains no LiveContainer code and keeps the MIT license.
